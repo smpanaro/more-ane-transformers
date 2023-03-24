@@ -1,0 +1,6 @@
+*.json
+*.DS_Store
+*.pyc
+*.egg-info
+dist
+env
