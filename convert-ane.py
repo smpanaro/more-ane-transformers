@@ -51,11 +51,13 @@ print(traced_token_predictor)
 print("Trace finished")
 print("Beginning conversion")
 
-
 # Going totally F16 is too much. The PSNR drops dramatically and generation is completely garbled.
-compute_precision=ct.transform.FP16ComputePrecision(
-    op_selector=lambda op:  op.op_type == "conv"
-)
+def op_selector(op):
+    # All the ops involved in LayerNorm. Keep this in f32.
+    return op.op_type not in ["sub", "mul", "reduce_mean", "add", "rsqrt"]
+
+# compute_precision=ct.precision.FLOAT16
+compute_precision=ct.transform.FP16ComputePrecision(op_selector)
 mlmodel = ct.convert(
     traced_token_predictor,
     # Range for the sequence dimension to be between [1, 64]
@@ -86,10 +88,12 @@ cm_out = torch.from_numpy(cm_out["logits"]).to(precision_dtype)
 assert og_out.shape == cm_out.shape, f"{og_out.shape} != {cm_out.shape}"
 assert og_out.dtype == cm_out.dtype, f"{og_out.dtype} != {cm_out.dtype}"
 
-print("these should be >60, ideally much higher.")
-print("traced-og     psnr:", compute_psnr(og_out.numpy(), tr_out.numpy()))
-print("coreml-traced psnr:", compute_psnr(tr_out.numpy(), cm_out.numpy()))
-print("coreml-og     psnr:", compute_psnr(og_out.numpy(), cm_out.numpy()))
+
+print("this should be quite high. probably >200 or more.")
+print("traced-original psnr:", compute_psnr(og_out.numpy(), tr_out.numpy()))
+print("\nthese should be >60, ideally much higher.")
+print("coreml-traced   psnr:", compute_psnr(tr_out.numpy(), cm_out.numpy()))
+print("coreml-original psnr:", compute_psnr(og_out.numpy(), cm_out.numpy()))
 # np.testing.assert_allclose(og_out.numpy(), tr_out.numpy(), atol=1e-5, rtol=1e-4)
 # np.testing.assert_allclose(cm_out, tr_out.numpy(), atol=1e-5, rtol=1e-4)
 
@@ -98,4 +102,4 @@ if compute_precision == ct.precision.FLOAT32:
     suffix="-f32"
 
 print("Saving")
-mlmodel.save(f"{model_filename}{suffix}-conv2dfp16.mlpackage")
+mlmodel.save(f"{model_filename}{suffix}.mlpackage")
