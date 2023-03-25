@@ -34,7 +34,7 @@ for _ in range(20):
     with torch.no_grad():
         # print('input.shape', ane_inputs['input_ids'].shape)
         ane_inputs = ane_model.build_inputs(ane_inputs['input_ids'])
-        ane_next = sample(ane_model(ane_inputs['input_ids'], qk_mask=ane_inputs['qk_mask'])[0])
+        ane_next = sample(ane_model(ane_inputs['input_ids'], qk_mask=ane_inputs['qk_mask']))
         ane_inputs['input_ids'] = torch.cat((ane_inputs['input_ids'], ane_next.unsqueeze(-1)), dim=-1)
         print("ANE: ", tok.decode(ane_inputs["input_ids"].squeeze()))
 

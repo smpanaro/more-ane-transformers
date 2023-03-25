@@ -132,11 +132,15 @@ class Block(nn.Module):
         self.ln_2 = AneLayerNorm(config.n_embd)
         self.mlp = AneMLP(config.n_embd, 4 * config.n_embd, dropout=config.dropout)
 
-    def forward(self, x, qk_mask=None):
+    def forward(self, x, qk_mask=None, k_mask=None):
+        """
+        x: (batch, embed_dim, 1, seqlen) aka BC1S
+        qk_mask, k_mask as in AneSelfAttention
+        """
         # print("xin", x.shape)
         # print("self.ln_1(x)", self.ln_1(x).shape)
         # print(" self.attn(self.ln_1(x))",  self.attn(self.ln_1(x)).shape)
-        x = x + self.attn(self.ln_1(x), qk_mask=qk_mask)
+        x = x + self.attn(self.ln_1(x), qk_mask=qk_mask, k_mask=k_mask)
         x = x + self.mlp(self.ln_2(x))
         # print("xout", x.shape)
         return x
@@ -220,7 +224,7 @@ class GPT(nn.Module):
         # Batch=1, Sequence=NumTokens, Channels=NumEmbed aka Hidden Size
         return x.transpose(1, 2).unsqueeze(2)
 
-    def forward(self, idx, qk_mask=None, targets=None):
+    def forward(self, idx, qk_mask=None, k_mask=None, targets=None):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -239,7 +243,7 @@ class GPT(nn.Module):
         x = x.transpose(1, 2).unsqueeze(2)
 
         for block in self.transformer.h:
-            x = block(x, qk_mask=qk_mask)
+            x = block(x, qk_mask=qk_mask, k_mask=k_mask)
         x = self.transformer.ln_f(x)
 
         # print("x post-blocks", x.shape)
@@ -261,7 +265,7 @@ class GPT(nn.Module):
             # TODO: Sprinkle in a softmax here? Or does that prevent us from doing top-p/top-k
             loss = None
 
-        return logits, loss
+        return logits
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
@@ -412,15 +416,33 @@ class GPT(nn.Module):
         return idx
 
     @staticmethod
-    def build_inputs(seq):
+    def build_inputs(seq, pad_to_length=None, pad_token_id=-1):
         seqlen = seq.shape[1]
+
+        if not pad_to_length:
+            pad_to_length = seqlen
+        length = pad_to_length
+
+        assert length == seqlen or pad_token_id != -1, "pad token must be provided when padding"
+
         # Upper triangular mask but in the BC1S format. aka causal mask
         # Note the transpose! Don't really get it, but easy to see when comparing the results of applying the mask.
-        qk_mask = ((1 - torch.tril(torch.ones((seqlen,seqlen)))).t() * -1e4).view(1, seqlen, 1, seqlen)
-        # We want to attend to the whole sequence. aka attention mask
-        k_mask = torch.zeros(seqlen).view(1,seqlen,1,1)
+        qk_mask = ((1 - torch.tril(torch.ones((length,length), dtype=torch.float32))).t() * -1e4).view(1, length, 1, length)
+
+        # We want to attend to the whole sequence, but not the padding. aka attention mask
+        k_mask = torch.cat([
+            torch.zeros(seqlen, dtype=torch.float32),
+            torch.full((pad_to_length - seqlen,), float(-1e4))
+        ]).view(1,length,1,1)
+
+        # Pad the sequence itself too.
+        input_ids = torch.cat([
+            seq.squeeze(),
+            torch.full((pad_to_length - seqlen,), pad_token_id)
+        ]).unsqueeze(0)
+
         return {
-            "input_ids": seq,
+            "input_ids": input_ids.int(),
             "qk_mask": qk_mask,
             "k_mask": k_mask,
         }

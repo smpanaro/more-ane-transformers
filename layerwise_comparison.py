@@ -65,7 +65,7 @@ with torch.no_grad():
     van_preb = van.prepare_for_block(idx)
     print_stats("pre block", bc1s_to_bsc(ane_preb), van_preb)
 
-    ane_b1 = ane.transformer.h[0](ane.prepare_for_block(idx), qk_mask=qk_mask)
+    ane_b1 = ane.transformer.h[0](ane.prepare_for_block(idx), qk_mask=qk_mask, k_mask=k_mask)
     van_b1 = van.transformer.h[0](van.prepare_for_block(idx))
     print_stats("layer 1", bc1s_to_bsc(ane_b1), van_b1)
 
@@ -73,7 +73,7 @@ with torch.no_grad():
     van_b1_ln_1 = van.transformer.h[0].ln_1(van.prepare_for_block(idx))
     print_stats("layer 1 ln1", bc1s_to_bsc(ane_b1_ln_1), van_b1_ln_1,)
 
-    ane_b1_attn = ane.transformer.h[0].attn(ane_b1_ln_1, qk_mask=qk_mask)
+    ane_b1_attn = ane.transformer.h[0].attn(ane_b1_ln_1, qk_mask=qk_mask, k_mask=k_mask)
     van_b1_attn = van.transformer.h[0].attn(van_b1_ln_1)
     print_stats("layer 1 attn", bc1s_to_bsc(ane_b1_attn), van_b1_attn)
 
@@ -89,7 +89,7 @@ with torch.no_grad():
     van_b1_attn_vproj = van.transformer.h[0].attn.v_proj(van_b1_ln_1)
     print_stats("layer 1 vproj", bc1s_to_bsc(ane_b1_attn_vproj), van_b1_attn_vproj)
 
-    ane_b1_attn_atnn = ane.transformer.h[0].attn._attention_fn(ane_b1_attn_qproj, ane_b1_attn_kproj, ane_b1_attn_vproj, qk_mask, None, False)[0].contiguous().view(1, 768, 1, seqlen)
+    ane_b1_attn_atnn = ane.transformer.h[0].attn._attention_fn(ane_b1_attn_qproj, ane_b1_attn_kproj, ane_b1_attn_vproj, qk_mask, k_mask, False)[0].contiguous().view(1, 768, 1, seqlen)
     van_b1_attn_atnn = van.transformer.h[0].attn._attention_fn(van_b1_ln_1, van_b1_attn_qproj, van_b1_attn_kproj, van_b1_attn_vproj)
     print_stats("layer 1 inner attn", bc1s_to_bsc(ane_b1_attn_atnn), van_b1_attn_atnn)
 
@@ -99,7 +99,7 @@ with torch.no_grad():
     assert len(ane_b1_attn_qxk) == len(van_b1_attn_qxk)
     print_stats("layer 1 q@k", ane_b1_attn_qxk.permute(0, 2, 3, 1), van_b1_attn_qxk)
 
-    ane_b1_attn_qxk_sm = ane.transformer.h[0].attn._qk_softmax(ane_b1_attn_qproj, ane_b1_attn_kproj, ane_b1_attn_vproj, qk_mask=qk_mask)
+    ane_b1_attn_qxk_sm = ane.transformer.h[0].attn._qk_softmax(ane_b1_attn_qproj, ane_b1_attn_kproj, ane_b1_attn_vproj, qk_mask=qk_mask, k_mask=k_mask)
     van_b1_attn_qxk_sm = van.transformer.h[0].attn._qk_softmax(van_b1_ln_1, van_b1_attn_qproj, van_b1_attn_kproj, van_b1_attn_vproj)
     assert len(ane_b1_attn_qxk_sm) == len(van_b1_attn_qxk_sm)
     print_stats("layer 1 q@k softmax", ane_b1_attn_qxk_sm.permute(0, 2, 3, 1), van_b1_attn_qxk_sm)
@@ -120,7 +120,7 @@ with torch.no_grad():
     ane_all_blocks = ane.prepare_for_block(idx)
     van_all_blocks = van.prepare_for_block(idx)
     for nh, (ab, vb) in enumerate(zip(ane.transformer.h, van.transformer.h)):
-        ane_all_blocks = ab(ane_all_blocks, qk_mask=qk_mask)
+        ane_all_blocks = ab(ane_all_blocks, qk_mask=qk_mask, k_mask=k_mask)
         van_all_blocks = vb(van_all_blocks)
         print_stats(f"layer {nh}", bc1s_to_bsc(ane_all_blocks), van_all_blocks, end="")
 
@@ -128,9 +128,14 @@ with torch.no_grad():
     van_lm = van.lm_head(van_all_blocks)
     print_stats("lm", ane_lm, van_lm)
 
-# E2E
+# E2E - with k_mask to make sure that works.
+
+ane_inputs = ane.build_inputs(idx, pad_to_length=40, pad_token_id=350)
+ane_idx = ane_inputs["input_ids"]
+qk_mask, k_mask = ane_inputs["qk_mask"], ane_inputs["k_mask"]
+
 with torch.no_grad():
-    ane_out = ane(idx, qk_mask)[0][:, [-1], :]
+    ane_out = ane(ane_idx, qk_mask, k_mask)[:, [seqlen-1], :]
     van_out = van(idx)[0]
 
 assert ane_out.shape == van_out.shape, f"{ane_out.shape} != {van_out.shape}"
