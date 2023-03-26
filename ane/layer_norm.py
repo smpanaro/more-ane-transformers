@@ -66,6 +66,7 @@ class LayerNormANE(nn.Module):
 
         assert input_rank == self.expected_rank
         assert inputs.size(1) == self.num_channels
+        assert inputs.dtype == torch.float16 or inputs.dtype == torch.float32
 
         if self.clip_mag is not None:
             inputs.clamp_(-self.clip_mag, self.clip_mag)
