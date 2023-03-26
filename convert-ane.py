@@ -53,8 +53,16 @@ print("Beginning conversion")
 
 # Going totally F16 is too much. The PSNR drops dramatically and generation is completely garbled.
 def op_selector(op):
+    """
+    Return true to use float16 for the op. Must be f16 to run on Neural Engine.
+
+    You can find op_type by looking in Netron and print out the op names here
+    (usually they contain a variable name).
+    """
     # All the ops involved in LayerNorm. Keep this in f32.
-    return op.op_type not in ["sub", "mul", "reduce_mean", "add", "rsqrt"]
+    # LayerNorm is where we lose most of our precision. Interestingly, it seems
+    # the first mean contributes almost all the error.
+    return op.op_type not in ["reduce_mean"] or "channels_mean" not in op.name
 
 # compute_precision=ct.precision.FLOAT16
 compute_precision=ct.transform.FP16ComputePrecision(op_selector)
@@ -76,14 +84,12 @@ mlmodel = ct.convert(
 
 print("Conversion finished")
 
-precision_dtype = torch.float32 if ct.precision.FLOAT32 == compute_precision else torch.float16
-
-
+# Always compare in float32 so we don't overflow.
 with torch.no_grad():
-    og_out = token_predictor(inputs_dict["input_ids"], inputs_dict["qk_mask"], inputs_dict["k_mask"]).to(precision_dtype)
-    tr_out = traced_token_predictor(inputs_dict["input_ids"], inputs_dict["qk_mask"], inputs_dict["k_mask"]).to(precision_dtype)
+    og_out = token_predictor(inputs_dict["input_ids"], inputs_dict["qk_mask"], inputs_dict["k_mask"]).to(torch.float32)
+    tr_out = traced_token_predictor(inputs_dict["input_ids"], inputs_dict["qk_mask"], inputs_dict["k_mask"]).to(torch.float32)
 cm_out = mlmodel.predict(inputs_dict)
-cm_out = torch.from_numpy(cm_out["logits"]).to(precision_dtype)
+cm_out = torch.from_numpy(cm_out["logits"]).to(torch.float32)
 
 assert og_out.shape == cm_out.shape, f"{og_out.shape} != {cm_out.shape}"
 assert og_out.dtype == cm_out.dtype, f"{og_out.dtype} != {cm_out.dtype}"

@@ -416,7 +416,7 @@ class GPT(nn.Module):
         return idx
 
     @staticmethod
-    def build_inputs(seq, pad_to_length=None, pad_token_id=-1):
+    def build_inputs(seq, pad_to_length=None, pad_token_id=-1, dtype=torch.float32):
         seqlen = seq.shape[1]
 
         if not pad_to_length:
@@ -427,12 +427,12 @@ class GPT(nn.Module):
 
         # Upper triangular mask but in the BC1S format. aka causal mask
         # Note the transpose! Don't really get it, but easy to see when comparing the results of applying the mask.
-        qk_mask = ((1 - torch.tril(torch.ones((length,length), dtype=torch.float32))).t() * -1e4).view(1, length, 1, length)
+        qk_mask = ((1 - torch.tril(torch.ones((length,length), dtype=dtype))).t() * -1e4).view(1, length, 1, length)
 
         # We want to attend to the whole sequence, but not the padding. aka attention mask
         k_mask = torch.cat([
-            torch.zeros(seqlen, dtype=torch.float32),
-            torch.full((pad_to_length - seqlen,), float(-1e4))
+            torch.zeros(seqlen, dtype=dtype),
+            torch.full((pad_to_length - seqlen,), float(-1e4), dtype=dtype)
         ]).view(1,length,1,1)
 
         # Pad the sequence itself too.

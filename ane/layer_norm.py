@@ -46,6 +46,15 @@ class LayerNormANE(nn.Module):
             nn.init.ones_(self.weight)
             nn.init.zeros_(self.bias)
 
+    def check_overunderflow(self, x):
+        f16_min = torch.finfo(torch.float16).min
+        f16_max = torch.finfo(torch.float16).max
+
+        # Check for values that are outside the range of float16
+        ouf = torch.any(x < f16_min) or torch.any(x > f16_max) or torch.isnan(x).any() or torch.isinf(x).any()
+        if ouf:
+            print("x is out of bounds", x)
+
     def forward(self, inputs):
         input_rank = len(inputs.size())
 
