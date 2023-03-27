@@ -6,19 +6,31 @@ import numpy as np
 import coremltools as ct
 from stopwatch import Stopwatch
 from baseline_gpt2 import GPT as NanoGPT
+import argparse
+
+"""
+Load a CoreML model and use it to generate text.
+"""
+
+parser = argparse.ArgumentParser(description='Load a CoreML modelpackage and generate some text.')
+parser.add_argument('--model_path', help='path to .mlpackage file', default="baseline-gpt2-large_2023_03_26-21_37_19-fmixed.mlpackage", type=str)
+parser.add_argument('--input_prompt', help='input prompt for the model', default="What is the answer to life, the universe, and everything?", type=str)
+parser.add_argument('--compute_unit', help='compute unit', type=ct.ComputeUnit, choices=list(ct.ComputeUnit), default=ct.ComputeUnit.ALL)
+
+args = parser.parse_args()
+
+if not args.model_path.endswith('.mlpackage'):
+    print('Error: Model path must end in .mlpackage')
 
 print("Loading tokenizer...")
-model_name = "gpt2"
-tok = AutoTokenizer.from_pretrained(model_name)
+tok = AutoTokenizer.from_pretrained("gpt2")
 tok.pad_token_id = tok.eos_token_id
 print("Loaded tokenizer.")
 
-
 # nano = NanoGPT.from_pretrained("gpt2").eval()
-print("Loading model...")
+print(f"Loading model from path {args.model_path} using {args.compute_unit}...")
 load_stopwatch = Stopwatch(3)
-model = ct.models.model.MLModel("baseline-gpt2-large_2023_03_26-21_37_19-fmixed.mlpackage",
-                                compute_units=ct.ComputeUnit.CPU_AND_NE)
+model = ct.models.model.MLModel(args.model_path, compute_units=ct.ComputeUnit.ALL)
 load_stopwatch.stop()
 print(f"Loaded ANE model in {load_stopwatch}.")
 # print(model)
@@ -35,7 +47,7 @@ def sample(logits, temperature=0.8, top_k=20):
     probs = torch.nn.functional.softmax(logits, dim=-1)
     return torch.multinomial(probs.squeeze(), num_samples=1)
 
-text = "What is the answer to life, the universe, and everything?"
+text = args.input_prompt
 inputs = tok(text, return_tensors="pt")
 print("Tokenized initial inputs:", inputs["input_ids"].shape)
 ane_inputs = AneGPT.build_inputs(inputs['input_ids'], pad_to_length=512, pad_token_id=tok.pad_token_id)

@@ -8,6 +8,9 @@ from ane_gpt2 import GPT as ANEGPT
 """
 Experimental setup for going layer-by-layer to see which
 layers cause a drop in PSNR after conversion to CoreML.
+
+Turns out it's the LayerNorm (specifically computing the sum in float16
+before dividing it for the mean).
 """
 
 def compute_psnr(a, b):
@@ -73,8 +76,6 @@ token_predictor = TestNet(ane).eval()
 random_tokens = torch.randint(30000, (1,10,))
 inputs_dict = ANEGPT.build_inputs(random_tokens, pad_to_length=512, pad_token_id=350)
 output_mask = torch.tensor([13], dtype=torch.int32)
-# output_mask = torch.zeros(512, dtype=torch.int32)
-# output_mask[13] = 1
 print("output_mask", output_mask)
 input_ids, qk_mask, k_mask = inputs_dict["input_ids"], inputs_dict["qk_mask"], inputs_dict["k_mask"]
 

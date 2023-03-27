@@ -5,15 +5,16 @@ import numpy as np
 from psnr import compute_psnr
 
 """
-What is this file??
+What is this file?
 It's a step-by-step, layer-by-layer process of debugging why the Apple Neural Engine (ANE) optimized
 model does not match the reference (aka vanilla) gpt2 model.
 
 The PSNR (peak signal-to-noise ratio) is taken from the ane transformers repo and is a way
-to measure how well the two models match. It seems like 150-200 is good, and in the Apple
-repo 60 is the minimum bar they set. Despite some horrific bugs I never got lower than 20 or so.
+to measure how well the two models match. It seems like 150-200 is good (since these should be mathematically equivalent
+-- e.g. in the Apple repo 60 is the minimum bar they set for the lossy conversion to CoreML).
+Despite some horrific bugs I never got lower than 20 or so. Lower than 60 and something is likely wrong.
 
-Run this file, look at the psnr logs and if any are <<150, start debugging that layer.
+Run this file, look at the PSNR logs and if any are <<150, start debugging that layer.
 """
 
 ane = ANE.from_pretrained("gpt2")

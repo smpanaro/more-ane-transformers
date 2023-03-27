@@ -1,4 +1,7 @@
 """
+An almost-verbatim unmodified version of nanoGPT. Useful for comparing if ANE-modifications
+are mathematically equivalent.
+
 Full definition of a GPT Language Model, all of it in this single file.
 References:
 1) the official GPT-2 TensorFlow implementation released by OpenAI:

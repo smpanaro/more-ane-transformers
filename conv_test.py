@@ -1,6 +1,11 @@
 import torch
 from torch import nn
 
+"""
+Experiment to convince myself about how to appropriately translate
+weights for a Conv1D to Conv2d.
+"""
+
 EMBED_DIM = 768
 
 class Conv1D(nn.Module):
@@ -45,5 +50,6 @@ print("1d out", oned_out.shape)
 print("2d out", twod_out.shape)
 
 twod_out = twod_out.squeeze(-1).squeeze(-1)
+# TODO: cosine similarity is kind of garbage, did I mess this conversion up in the ane-optimized model?
 print(nn.CosineSimilarity(dim=-1)(oned_out, twod_out).mean())
 print(torch.equal(oned_out, twod_out))

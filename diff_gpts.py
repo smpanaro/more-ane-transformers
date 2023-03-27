@@ -3,6 +3,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 import numpy as np
 
+"""
+Load both a huggingface gpt2 and an ANE-optimized one
+and generate sentences for both. Useful for subjective analysis.
+Superseded by PSNR checks and CoreML generate.
+"""
+
 model_name = "gpt2"
 hf_model = AutoModelForCausalLM.from_pretrained(model_name)
 hf_model.eval()

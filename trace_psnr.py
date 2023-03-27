@@ -2,28 +2,13 @@ import torch
 from ane_gpt2 import GPT as ANEGPT
 import numpy as np
 import coremltools as ct
+from psnr import compute_psnr
 
 """
 Compare the PSNR for a saved mlpackage with a model
-and its traced version.
+and its traced version. Useful for ruling out tracing
+as the source of error.
 """
-
-def compute_psnr(a, b):
-    """ Compute Peak-Signal-to-Noise-Ratio across two numpy.ndarray objects
-    """
-    max_b = np.abs(b).max()
-    sumdeltasq = 0.0
-
-    sumdeltasq = ((a - b) * (a - b)).sum()
-
-    sumdeltasq /= b.size
-    sumdeltasq = np.sqrt(sumdeltasq)
-
-    eps = 1e-5
-    eps2 = 1e-10
-    psnr = 20 * np.log10((max_b + eps) / (sumdeltasq + eps2))
-
-    return psnr
 
 token_predictor = ANEGPT.from_pretrained("gpt2").eval()
 

@@ -4,6 +4,7 @@ import torch
 def compute_psnr(a, b):
     """
     Compute Peak-Signal-to-Noise-Ratio across two numpy.ndarray objects
+    From ml-ane-transformers.
     """
     if torch.is_tensor(a):
         a = a.numpy()

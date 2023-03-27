@@ -4,29 +4,15 @@ import coremltools as ct
 import numpy as np
 from datetime import datetime
 from ane_gpt2 import GPT as ANEGPT
+from psnr import compute_psnr
 
-def compute_psnr(a, b):
-    """ Compute Peak-Signal-to-Noise-Ratio across two numpy.ndarray objects
-    """
-    max_b = np.abs(b).max()
-    sumdeltasq = 0.0
-
-    sumdeltasq = ((a - b) * (a - b)).sum()
-
-    sumdeltasq /= b.size
-    sumdeltasq = np.sqrt(sumdeltasq)
-
-    eps = 1e-5
-    eps2 = 1e-10
-    psnr = 20 * np.log10((max_b + eps) / (sumdeltasq + eps2))
-
-    return psnr
+"""
+Convert a ANE-optimized nanoGPT to CoreML.
+"""
 
 file_suffix = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
 
 model_name = "gpt2"
-# model_name = "togethercomputer/GPT-JT-6B-v1"
-#model_name = "trl-internal-testing/tiny-random-GPTJForCausalLM"
 model_filename = model_name.split("/")[-1] + "_" + file_suffix
 
 retrace = True
@@ -65,6 +51,7 @@ def op_selector(op):
     # All the ops involved in LayerNorm. Keep this in f32.
     # LayerNorm is where we lose most of our precision. Interestingly, it seems
     # the first mean contributes almost all the error.
+    # TODO: This may only be a problem for "gpt", never tried the larger variants.
     return op.op_type not in ["reduce_mean"] or "channels_mean" not in op.name
 
 compute_precision=ct.precision.FLOAT16
@@ -74,7 +61,6 @@ mlmodel = ct.convert(
     inputs=[
         ct.TensorType(name="input_ids", shape=[1, 512], dtype=np.int32),
         ct.TensorType(name="qk_mask", shape=[1, 512, 1, 512], dtype=np.float32),
-        # ct.TensorType(name="k_mask", shape=[1, 512, 1, 1], dtype=np.float32),
         ct.TensorType(name="output_mask", shape=[1], dtype=np.int32),
     ],
     outputs=[
@@ -109,7 +95,7 @@ assert og_out.dtype == cm_out.dtype, f"{og_out.dtype} != {cm_out.dtype}"
 
 print("this should be quite high. probably >200 or more.")
 print("traced-original psnr:", compute_psnr(og_out.numpy(), tr_out.numpy()))
-print("\nthese should be >60, ideally much higher.")
+print("\nthese should be >60, ideally much higher.") # otherwise you're only going to generate gibberish
 print("coreml-traced   psnr:", compute_psnr(tr_out.numpy(), cm_out.numpy()))
 print("coreml-original psnr:", compute_psnr(og_out.numpy(), cm_out.numpy()))
 # np.testing.assert_allclose(og_out.numpy(), tr_out.numpy(), atol=1e-5, rtol=1e-4)

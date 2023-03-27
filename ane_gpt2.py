@@ -1,10 +1,10 @@
 """
-Full definition of a GPT Language Model, all of it in this single file.
+A fairly modified version of nanoGPT that attempts to apply the principles
+from the ml-ane-transformers repo. Functional, but not as fast as I had hoped.
+
 References:
-1) the official GPT-2 TensorFlow implementation released by OpenAI:
-https://github.com/openai/gpt-2/blob/master/src/model.py
-2) huggingface/transformers PyTorch implementation:
-https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
+https://github.com/karpathy/nanoGPT/blob/a82b33b525ca9855d705656387698e13eb8e8d4b/model.py#L1
+https://github.com/apple/ml-ane-transformers/tree/main/ane_transformers/reference
 """
 
 import math

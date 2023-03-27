@@ -1,3 +1,4 @@
+misc notes / explorations.
 ### March 25, 2023
 Played around with the first working GPT2 float16 model (the one with only channel_mean as f32) to see how performance responded to a few changes. Completely ignores accuracy since that goes out with the window without the f32 mean.
 
