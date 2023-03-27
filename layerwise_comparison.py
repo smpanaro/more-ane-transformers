@@ -2,6 +2,7 @@ from vanilla_gpt2 import GPT as Vanilla
 from ane_gpt2 import GPT as ANE
 import torch
 import numpy as np
+from psnr import compute_psnr
 
 """
 What is this file??
@@ -15,24 +16,6 @@ repo 60 is the minimum bar they set. Despite some horrific bugs I never got lowe
 Run this file, look at the psnr logs and if any are <<150, start debugging that layer.
 """
 
-
-def compute_psnr(a, b):
-    """ Compute Peak-Signal-to-Noise-Ratio across two numpy.ndarray objects
-    """
-    max_b = np.abs(b).max()
-    sumdeltasq = 0.0
-
-    sumdeltasq = ((a - b) * (a - b)).sum()
-
-    sumdeltasq /= b.size
-    sumdeltasq = np.sqrt(sumdeltasq)
-
-    eps = 1e-5
-    eps2 = 1e-10
-    psnr = 20 * np.log10((max_b + eps) / (sumdeltasq + eps2))
-
-    return psnr
-
 ane = ANE.from_pretrained("gpt2")
 van = Vanilla.from_pretrained("gpt2")
 ane.eval()
@@ -41,14 +24,15 @@ van.eval()
 seqlen = 20
 idx = torch.randint(30000, (1, seqlen,))
 ane_inputs = ane.build_inputs(idx)
-qk_mask, k_mask = ane_inputs["qk_mask"], ane_inputs["k_mask"]
+qk_mask, k_mask = [ane_inputs[k] for k in ["qk_mask", "k_mask"]]
+k_mask = None
 
 print("---\n")
 
 def print_stats(name: str, a, v, should_be_equal=False, end="\n"):
     if torch.equal(a,v) and not should_be_equal:
         print("BUG: most likely passed the wrong things")
-    print(name, a.shape, v.shape, "psnr", compute_psnr(a.numpy(), v.numpy()), end)
+    print(name, a.shape, v.shape, "psnr", compute_psnr(a, v), end)
 
 def bc1s_to_bsc(x):
     assert len(x.shape) == 4
@@ -132,10 +116,10 @@ with torch.no_grad():
 
 ane_inputs = ane.build_inputs(idx, pad_to_length=40, pad_token_id=350)
 ane_idx = ane_inputs["input_ids"]
-qk_mask, k_mask = ane_inputs["qk_mask"], ane_inputs["k_mask"]
+qk_mask, k_mask, output_mask = [ane_inputs[k] for k in ["qk_mask", "k_mask", "output_mask"]]
 
 with torch.no_grad():
-    ane_out = ane(ane_idx, qk_mask, k_mask)[:, [seqlen-1], :]
+    ane_out = ane(ane_idx, qk_mask=qk_mask, output_mask=output_mask, k_mask=None)[:, [-1], :]
     van_out = van(idx)[0]
 
 assert ane_out.shape == van_out.shape, f"{ane_out.shape} != {van_out.shape}"

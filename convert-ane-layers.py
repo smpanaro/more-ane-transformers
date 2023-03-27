@@ -27,7 +27,7 @@ def compute_psnr(a, b):
 
     return psnr
 
-file_suffix = datetime.now().strftime("%Y_%m_%d-%I_%M_%S_%p")
+file_suffix = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
 
 class TestNet(torch.nn.Module):
     """
@@ -38,7 +38,7 @@ class TestNet(torch.nn.Module):
         super().__init__()
         self.ane = ane
 
-    def forward(self, x, qk_mask=None, k_mask=None):
+    def forward(self, x, qk_mask=None, k_mask=None, output_mask=None):
         device = x.device
         b, t = x.size()
         # assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -48,15 +48,19 @@ class TestNet(torch.nn.Module):
         x = self.ane.transformer.drop(tok_emb + pos_emb) # psnr: f32:212, f16:99
 
         x = x.transpose(1, 2).unsqueeze(2)
-        for h in self.ane.transformer.h:
+        for h in self.ane.transformer.h[:1]:
             x = h(x, qk_mask, k_mask)
             # x = h.ln_1(x)
             # x = h.attn(x, qk_mask=qk_mask, k_mask=k_mask) # psnr f16:89
             # x = h.ln_2(x) # psnr f16:77
             # x = h.mlp(x)  # psnr f16:62
 
-        # x = x.permute(3, 1, 0, 2)
-        # x = self.ane.lm_head(x).squeeze().unsqueeze(0)
+        x = x.permute(3, 1, 0, 2)
+        x = self.ane.lm_head(x).squeeze().unsqueeze(0)
+
+        if output_mask is not None:
+            x = torch.index_select(x, 1, output_mask)
+
         return x
 
 model_name = "gpt2"
@@ -68,11 +72,15 @@ token_predictor = TestNet(ane).eval()
 
 random_tokens = torch.randint(30000, (1,10,))
 inputs_dict = ANEGPT.build_inputs(random_tokens, pad_to_length=512, pad_token_id=350)
+output_mask = torch.tensor([13], dtype=torch.int32)
+# output_mask = torch.zeros(512, dtype=torch.int32)
+# output_mask[13] = 1
+print("output_mask", output_mask)
 input_ids, qk_mask, k_mask = inputs_dict["input_ids"], inputs_dict["qk_mask"], inputs_dict["k_mask"]
 
 print(f"Tracing the model with {input_ids.shape}")
 
-traced_token_predictor = torch.jit.trace(token_predictor, (input_ids, qk_mask, k_mask))
+traced_token_predictor = torch.jit.trace(token_predictor, (input_ids, qk_mask, k_mask, output_mask))
 
 print(traced_token_predictor)
 
@@ -85,6 +93,7 @@ mlmodel = ct.convert(
         ct.TensorType(name="input_ids", shape=input_ids.shape, dtype=np.int32),
         ct.TensorType(name="qk_mask", shape=[1, 512, 1, 512], dtype=np.float32),
         ct.TensorType(name="k_mask", shape=[1, 512, 1, 1], dtype=np.float32),
+        ct.TensorType(name="output_mask", shape=[1], dtype=np.int32),
     ],
     outputs=[
         ct.TensorType(name="logits", dtype=np.float32),
@@ -97,9 +106,10 @@ mlmodel = ct.convert(
 print("Conversion finished")
 
 with torch.no_grad():
-    og_out = token_predictor(input_ids, qk_mask, k_mask).to(torch.float32)
-    tr_out = traced_token_predictor(input_ids, qk_mask, k_mask).to(torch.float32)
-cm_out = mlmodel.predict({"input_ids": input_ids, "qk_mask": qk_mask, "k_mask": k_mask})
+    og_out = token_predictor(input_ids, qk_mask, k_mask, output_mask).to(torch.float32)
+    tr_out = traced_token_predictor(input_ids, qk_mask, k_mask, output_mask).to(torch.float32)
+print("output_mask", output_mask.shape, output_mask.dtype)
+cm_out = mlmodel.predict({"input_ids": input_ids, "qk_mask": qk_mask, "k_mask": k_mask, "output_mask": output_mask})
 cm_out = torch.from_numpy(cm_out["logits"]).to(torch.float32)
 
 assert og_out.shape == cm_out.shape, f"{og_out.shape} != {cm_out.shape}"

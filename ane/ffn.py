@@ -21,20 +21,16 @@ class FFN(nn.Module):
     def __init__(self, embed_dim, ffn_dim, dropout=0.1, **kwargs):
         super().__init__()
         self.c_fc = nn.Conv2d(embed_dim, ffn_dim, 1)
-        self.c_proj = nn.Conv2d(ffn_dim, embed_dim, 1)
+        # gelu
         self.dropout = nn.Dropout(dropout) if dropout > 0. else nn.Identity()
+        self.c_proj = nn.Conv2d(ffn_dim, embed_dim, 1)
 
     def _forward_impl(self, x, **kwargs):
-        # for l in self.layers:
-        #     x = l(x)
-        # return x
-        # Implement manually?,
         x = self.c_fc(x)
         # Match OpenAI GPT implementation, gelu instead of relu.
         x = new_gelu(x)
-        # x = self.relu(x)
-        x = self.c_proj(x)
         x = self.dropout(x)
+        x = self.c_proj(x)
         return x
 
     def forward(self, x):

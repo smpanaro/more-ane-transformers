@@ -224,7 +224,7 @@ class GPT(nn.Module):
         # Batch=1, Sequence=NumTokens, Channels=NumEmbed aka Hidden Size
         return x.transpose(1, 2).unsqueeze(2)
 
-    def forward(self, idx, qk_mask=None, k_mask=None, targets=None):
+    def forward(self, idx, qk_mask=None, output_mask=None, k_mask=None, targets=None):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -261,6 +261,9 @@ class GPT(nn.Module):
             # inference-time mini-optimization: only forward the lm_head on the very last position
             # logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
             logits = self.lm_head(x).squeeze().unsqueeze(0)
+            # No need to pass back the other length-1 results we don't care about.
+            if output_mask is not None:
+                logits = torch.index_select(logits, 1, output_mask)
             # logits = logits.permute(2, 0, 1)
             # TODO: Sprinkle in a softmax here? Or does that prevent us from doing top-p/top-k
             loss = None
@@ -416,7 +419,7 @@ class GPT(nn.Module):
         return idx
 
     @staticmethod
-    def build_inputs(seq, pad_to_length=None, pad_token_id=-1, dtype=torch.float32):
+    def build_inputs(seq, pad_to_length=None, pad_token_id=-1, dtype=torch.float32, device="cpu"):
         seqlen = seq.shape[1]
 
         if not pad_to_length:
@@ -441,10 +444,15 @@ class GPT(nn.Module):
             torch.full((pad_to_length - seqlen,), pad_token_id)
         ]).unsqueeze(0)
 
+        # Used to mask outputs before they exit the model.
+        # input_ids: [0,1,2,3] length = 4, result is in index 3
+        output_mask = torch.tensor([seqlen-1], dtype=torch.int32)
+
         return {
-            "input_ids": input_ids.int(),
-            "qk_mask": qk_mask,
-            "k_mask": k_mask,
+            "input_ids": input_ids.int().to(device),
+            "qk_mask": qk_mask.to(device),
+            "k_mask": k_mask.to(device),
+            "output_mask": output_mask.to(device),
         }
 
 # def linear_to_conv2d_map(state_dict):

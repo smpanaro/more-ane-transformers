@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import numpy as np
 import coremltools as ct
 from stopwatch import Stopwatch
+from baseline_gpt2 import GPT as NanoGPT
 
 print("Loading tokenizer...")
 model_name = "gpt2"
@@ -13,11 +14,14 @@ tok.pad_token_id = tok.eos_token_id
 print("Loaded tokenizer.")
 
 
+# nano = NanoGPT.from_pretrained("gpt2").eval()
 print("Loading model...")
-model = ct.models.model.MLModel("gpt2_2023_03_25-12_35_10_AM-conv2dfp16.mlpackage",
-                                compute_units=ct.ComputeUnit.ALL)
-print("Loaded ANE model.")
-print(model)
+load_stopwatch = Stopwatch(3)
+model = ct.models.model.MLModel("baseline-gpt2-large_2023_03_26-21_37_19-fmixed.mlpackage",
+                                compute_units=ct.ComputeUnit.CPU_AND_NE)
+load_stopwatch.stop()
+print(f"Loaded ANE model in {load_stopwatch}.")
+# print(model)
 
 def sample(logits, temperature=0.8, top_k=20):
     if isinstance(logits, np.ndarray):
@@ -63,9 +67,13 @@ for i in range(NUM_INFERENCES):
     next_index = len(relevant_tokens[0]) - 1
     ane_inputs = AneGPT.build_inputs(relevant_tokens, pad_to_length=512, pad_token_id=tok.pad_token_id)
 
+    # attention_mask = ane_inputs["k_mask"].squeeze().unsqueeze(0)
+    # print(attention_mask.shape)
     stopwatch.start()
     # Hanging here? It's very likely your intputs are the wrong shape and/or types.
-    logits = model.predict(ane_inputs)["logits"]
+    # logits = model.predict(ane_inputs)["logits"]
+    logits = model.predict({"input_ids": ane_inputs["input_ids"]})["logits"] # nano
+    # logits = nano(ane_inputs["input_ids"], attention_mask)
     stopwatch.stop()
 
     ane_next = sample(logits[:, [next_index], :]) #ane_inputs['input_ids'], qk_mask=ane_inputs['qk_mask']))

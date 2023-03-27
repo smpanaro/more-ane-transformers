@@ -6,8 +6,16 @@
 import torch
 import torch.nn as nn
 
+from enum import Enum
+
 from .layer_norm import LayerNormANE
 
+class AttentionImplementations(Enum):
+    #ORIGINAL = "ORIGINAL"
+    EINSUM = "EINSUM"
+    SPLIT_EINSUM = "SPLIT_EINSUM"
+
+ATTENTION_IMPLEMENTATION_IN_EFFECT = AttentionImplementations.EINSUM
 
 class MultiHeadAttention(nn.Module):
     """ Multi-Head Attention optimized for efficient ANE deployment
@@ -144,46 +152,75 @@ class MultiHeadAttention(nn.Module):
             attn:           Attention embeddings of shape (batch_size, d_v, 1, tgt_seq_len)
             attn_weights:   If `return_weights` is True, returns the softmax attention weights used to compute the attention matrix
         """
-        # Principle 2: Chunking Large Intermediate Tensors  (machinelearning.apple.com/research/apple-neural-engine)
-        # Split q, k and v to compute a list of single-head attention functions
-        mh_q = q.split(
-            self.d_qk // self.n_head,
-            dim=1)  # n_head * (batch_size, d_qk/n_head, 1, tgt_seq_len)
-        # Principle 3: Minimizing Memory Copies
-        # Avoid as many transposes and reshapes as possible
-        mh_k = k.transpose(1, 3).split(
-            self.d_qk // self.n_head,
-            dim=3)  # n_head * (batch_size, src_seq_len, 1, d_qk/n_head)
-        mh_v = v.split(
-            self.d_v // self.n_head,
-            dim=1)  # n_head * (batch_size, d_v/n_head, 1, src_seq_len)
+        if ATTENTION_IMPLEMENTATION_IN_EFFECT == AttentionImplementations.EINSUM:
+            # Stolen/inspired from ml-stable-diffusion repo. No clue if it works,
+            # had a bug that turned it off by mistake so never tried.
+            bs = q.size(0)
+            dim_head = self.d_qk // self.n_head
+            mh_q = q.view(bs, self.n_head, dim_head, -1)
+            mh_k = k.view(bs, self.n_head, dim_head, -1)
+            mh_v = v.view(bs, self.n_head, dim_head, -1)
 
-        # `qk = q @ k`
-        attn_weights = [
-            torch.einsum('bchq,bkhc->bkhq', [qi, ki]) * self.q_normalize_fact
-            for qi, ki in zip(mh_q, mh_k)
-        ]  # n_head * (batch_size, src_seq_len, 1, tgt_seq_len)
+            # print("qkv", q.shape, k.shape, v.shape)
+            # print("mhqkv", mh_q.shape, mh_k.shape, mh_v.shape)
 
-        # Apply attention masking
-        if qk_mask is not None:
-            for head_idx in range(self.n_head):
-                attn_weights[head_idx] = attn_weights[head_idx] + qk_mask
-        if k_mask is not None:
-            for head_idx in range(self.n_head):
-                attn_weights[head_idx] = attn_weights[head_idx] + k_mask
+            attn_weights = torch.einsum("bhcq,bhck->bhqk", [mh_q, mh_k]) # 1,64,12,20 @ 1,64,20,12 = 1,64,20,20
+            attn_weights.mul_(self.q_normalize_fact)
 
-        # `w = F.softmax(qk.float(), dim=-1)`
-        attn_weights = [aw.softmax(dim=1) for aw in attn_weights
-                        ]  # n_head * (batch_size, src_seq_len, 1, tgt_seq_len)
-        mh_w = [self.dropout(aw) for aw in attn_weights
-                ]  # n_head * (batch_size, src_seq_len, 1, tgt_seq_len)
+            # print("attn,qk", attn_weights.shape, qk_mask.shape, k_mask.shape if k_mask is not None else None)
 
-        # (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2)
-        attn = [
-            torch.einsum('bkhq,bchk->bchq', wi, vi)
-            for wi, vi in zip(mh_w, mh_v)
-        ]  # n_head * (batch_size, d_v/n_head, 1, tgt_seq_len)
-        attn = torch.cat(attn, dim=1)  # (batch_size, d_v, 1, tgt_seq_len)
+            if qk_mask is not None:
+                qk_mask = qk_mask.squeeze(2).unsqueeze(0)
+                attn_weights = attn_weights + qk_mask
+            if k_mask is not None:
+                k_mask = k_mask.squeeze(2).unsqueeze(0)
+                attn_weights = attn_weights + k_mask
+
+            attn_weights = attn_weights.softmax(dim=3)
+
+            attn = torch.einsum("bhqk,bhck->bhcq", [attn_weights, mh_v])
+            attn = attn.contiguous().view(bs, self.d_out, 1, -1)
+        elif ATTENTION_IMPLEMENTATION_IN_EFFECT == AttentionImplementations.SPLIT_EINSUM:
+            # Principle 2: Chunking Large Intermediate Tensors  (machinelearning.apple.com/research/apple-neural-engine)
+            # Split q, k and v to compute a list of single-head attention functions
+            mh_q = q.split(
+                self.d_qk // self.n_head,
+                dim=1)  # n_head * (batch_size, d_qk/n_head, 1, tgt_seq_len)
+            # Principle 3: Minimizing Memory Copies
+            # Avoid as many transposes and reshapes as possible
+            mh_k = k.transpose(1, 3).split(
+                self.d_qk // self.n_head,
+                dim=3)  # n_head * (batch_size, src_seq_len, 1, d_qk/n_head)
+            mh_v = v.split(
+                self.d_v // self.n_head,
+                dim=1)  # n_head * (batch_size, d_v/n_head, 1, src_seq_len)
+
+            # `qk = q @ k`
+            attn_weights = [
+                torch.einsum('bchq,bkhc->bkhq', [qi, ki]) * self.q_normalize_fact
+                for qi, ki in zip(mh_q, mh_k)
+            ]  # n_head * (batch_size, src_seq_len, 1, tgt_seq_len)
+
+            # Apply attention masking
+            if qk_mask is not None:
+                for head_idx in range(self.n_head):
+                    attn_weights[head_idx] = attn_weights[head_idx] + qk_mask
+            if k_mask is not None:
+                for head_idx in range(self.n_head):
+                    attn_weights[head_idx] = attn_weights[head_idx] + k_mask
+
+            # `w = F.softmax(qk.float(), dim=-1)`
+            attn_weights = [aw.softmax(dim=1) for aw in attn_weights
+                            ]  # n_head * (batch_size, src_seq_len, 1, tgt_seq_len)
+            mh_w = [self.dropout(aw) for aw in attn_weights
+                    ]  # n_head * (batch_size, src_seq_len, 1, tgt_seq_len)
+
+            # (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2)
+            attn = [
+                torch.einsum('bkhq,bchk->bchq', wi, vi)
+                for wi, vi in zip(mh_w, mh_v)
+            ]  # n_head * (batch_size, d_v/n_head, 1, tgt_seq_len)
+            attn = torch.cat(attn, dim=1)  # (batch_size, d_v, 1, tgt_seq_len)
 
         if return_weights:
             return attn, attn_weights
