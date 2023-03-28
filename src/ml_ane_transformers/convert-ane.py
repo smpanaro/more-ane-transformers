@@ -3,8 +3,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModel
 import coremltools as ct
 import numpy as np
 from datetime import datetime
-from ane_gpt2 import GPT as ANEGPT
-from psnr import compute_psnr
+from .ane_gpt2 import GPT as ANEGPT
+from src.utils.psnr import compute_psnr
 
 """
 Convert a ANE-optimized nanoGPT to CoreML.
@@ -25,7 +25,7 @@ if retrace:
     inputs_dict = token_predictor.build_inputs(random_tokens, pad_to_length=512, pad_token_id=350)
     print(f"Tracing the model with {inputs_dict['input_ids']}")
     input_ids, qk_mask, k_mask, output_mask = [inputs_dict[k] for k in\
-                                               ["input_ids", "qk_mask", "k_mask", "output_mask"]]
+                                            ["input_ids", "qk_mask", "k_mask", "output_mask"]]
     del inputs_dict["k_mask"]
     # Exclude k_mask. It's a no-op for next-token prediction.
     traced_token_predictor = torch.jit.trace(token_predictor, (input_ids, qk_mask, output_mask))

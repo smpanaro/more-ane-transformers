@@ -1,0 +1,1 @@
+junk drawer of useful functions for elsewhere

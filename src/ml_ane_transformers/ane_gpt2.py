@@ -15,10 +15,10 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from ane.multihead_attention import SelfAttention as AneSelfAttention
+from .ane.multihead_attention import SelfAttention as AneSelfAttention
 # from ane.multihead_attention import MultiHeadAttention as AneMultiHeadAttention
-from ane.layer_norm import LayerNormANE as AneLayerNormx
-from ane.ffn import FFN as AneMLP
+from .ane.layer_norm import LayerNormANE as AneLayerNormx
+from .ane.ffn import FFN as AneMLP
 
 # Note: torch.nn.LayerNorm and ane_transformers.reference.layer_norm.LayerNormANE
 # apply scale and bias terms in opposite orders. In order to accurately restore a

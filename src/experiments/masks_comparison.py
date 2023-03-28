@@ -3,8 +3,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModel
 import coremltools as ct
 import numpy as np
 from datetime import datetime
-from ane_gpt2 import GPT as ANEGPT
-from psnr import compute_psnr
+from src.utils.psnr import compute_psnr
+from src.ml_ane_transformers.ane_gpt2 import GPT as ANEGPT
 
 """
 Experiment to see if we need k, qk or both when we only care about the

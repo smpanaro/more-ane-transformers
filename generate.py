@@ -1,38 +1,59 @@
-from ane_gpt2 import GPT as AneGPT
+from src.ml_ane_transformers.ane_gpt2 import GPT as AneGPT
 from transformers import AutoTokenizer
 import torch
 import torch.nn.functional as F
 import numpy as np
 import coremltools as ct
 from stopwatch import Stopwatch
-from baseline_gpt2 import GPT as NanoGPT
+from models.gpt2 import GPT as NanoGPT
 import argparse
+import sys
+import os
+from collections import OrderedDict
 
 """
 Load a CoreML model and use it to generate text.
 """
 
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
+
+
+compute_unit_by_name = OrderedDict([
+    ("All", ct.ComputeUnit.ALL),
+    ("CPUOnly", ct.ComputeUnit.CPU_ONLY),
+    ("CPUAndGPU", ct.ComputeUnit.CPU_AND_GPU),
+    ("CPUAndANE", ct.ComputeUnit.CPU_AND_NE),
+])
+
 parser = argparse.ArgumentParser(description='Load a CoreML modelpackage and generate some text.')
-parser.add_argument('--model_path', help='path to .mlpackage file', default="baseline-gpt2-large_2023_03_26-21_37_19-fmixed.mlpackage", type=str)
-parser.add_argument('--input_prompt', help='input prompt for the model', default="What is the answer to life, the universe, and everything?", type=str)
-parser.add_argument('--compute_unit', help='compute unit', type=ct.ComputeUnit, choices=list(ct.ComputeUnit), default=ct.ComputeUnit.ALL)
+parser.add_argument('--model_path', help='path to .mlpackage file', default="gpt2.mlpackage", type=str)
+parser.add_argument('--input_prompt', help='input prompt for the model', default="Before boarding your rocket to Mars, remember to pack these items", type=str)
+parser.add_argument('--compute_unit', help='compute unit', type=str, choices=list(compute_unit_by_name.keys()), default="All")
+parser.add_argument('--length', help='number of new tokens to generate', type=int, default=40)
+parser.add_argument('--verbose', help='print verbose logs', type=bool, default=False)
 
 args = parser.parse_args()
 
 if not args.model_path.endswith('.mlpackage'):
     print('Error: Model path must end in .mlpackage')
 
-print("Loading tokenizer...")
+compute_unit = compute_unit_by_name[args.compute_unit]
+
+def vprint(*pargs, **kwargs):
+    if args.verbose:
+        print(*pargs, **kwargs)
+
+vprint("Loading tokenizer...")
 tok = AutoTokenizer.from_pretrained("gpt2")
 tok.pad_token_id = tok.eos_token_id
-print("Loaded tokenizer.")
+vprint("Loaded tokenizer.")
 
 # nano = NanoGPT.from_pretrained("gpt2").eval()
-print(f"Loading model from path {args.model_path} using {args.compute_unit}...")
+print(f"Loading model from path {args.model_path} using {compute_unit}...")
 load_stopwatch = Stopwatch(3)
-model = ct.models.model.MLModel(args.model_path, compute_units=ct.ComputeUnit.ALL)
+model = ct.models.model.MLModel(args.model_path, compute_units=compute_unit)
 load_stopwatch.stop()
-print(f"Loaded ANE model in {load_stopwatch}.")
+print(f"Loaded model in {load_stopwatch}.")
 # print(model)
 
 def sample(logits, temperature=0.8, top_k=20):
@@ -49,12 +70,12 @@ def sample(logits, temperature=0.8, top_k=20):
 
 text = args.input_prompt
 inputs = tok(text, return_tensors="pt")
-print("Tokenized initial inputs:", inputs["input_ids"].shape)
+vprint("Tokenized initial inputs:", inputs["input_ids"].shape)
 ane_inputs = AneGPT.build_inputs(inputs['input_ids'], pad_to_length=512, pad_token_id=tok.pad_token_id)
-print("Generated initial inputs:")
-print({k: v.shape for k,v in ane_inputs.items()})
-print({k: v.dtype for k,v in ane_inputs.items()})
-# print({k: v.__class__ for k,v in ane_inputs.items()})
+vprint("Generated initial inputs:")
+vprint({k: v.shape for k,v in ane_inputs.items()})
+vprint({k: v.dtype for k,v in ane_inputs.items()})
+# vprint({k: v.__class__ for k,v in ane_inputs.items()})
 
 def get_start_idx(ids):
     ids = ids.tolist()[0]
@@ -72,7 +93,7 @@ stopwatch = Stopwatch(3)
 stopwatch.stop()
 stopwatch.reset()
 
-NUM_INFERENCES = 20
+NUM_INFERENCES = args.length
 
 relevant_tokens = without_pad(ane_inputs["input_ids"])
 for i in range(NUM_INFERENCES):
@@ -95,9 +116,14 @@ for i in range(NUM_INFERENCES):
     # print("chose", ane_next, "from idx:", next_index)
 
     relevant_tokens = torch.cat((relevant_tokens.squeeze(), torch.tensor([ane_next]))).unsqueeze(0)
-    print("->", tok.decode(relevant_tokens.squeeze()))
+    if i == 0:
+        print(f"\n\033[95m{tok.decode(relevant_tokens.squeeze())}\033[0m", end="")
+    else:
+        print(tok.decode(ane_next), end="")
+    sys.stdout.flush()
 
+print("\n\n---stats---")
 per_inference = "{:.{}f}ms".format((stopwatch.duration / NUM_INFERENCES) * 1000, 2)
-print(model.compute_unit)
+print(args.compute_unit)
 print(stopwatch, "total")
 print(f"{per_inference}/it")

@@ -3,8 +3,9 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModel
 import coremltools as ct
 import numpy as np
 from datetime import datetime
-from baseline_gpt2 import GPT
-from psnr import compute_psnr
+from models.gpt2 import GPT
+from src.utils.psnr import compute_psnr
+import argparse
 
 """
 Convert a slightly modified nanoGPT to CoreML. Originally intended as
@@ -12,10 +13,18 @@ a performance baseline (hence the filename) but realized this is faster
 than the ANE-optimized model and tuned it from there.
 """
 
+parser = argparse.ArgumentParser(description='Convert a model to CoreML.')
+parser.add_argument('--model_name', choices=['gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'], default="gpt2", type=str)
+args = parser.parse_args()
+
 file_suffix = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
 
-model_name = "gpt2"
+model_name = args.model_name
 model_filename = model_name.split("/")[-1] + "_" + file_suffix
+
+if model_name in ['gpt2-large', 'gpt2-xl']:
+    print("WARNING: This model is large and will be slow/impossible to convert without "+
+           "installing a modified version of coremltools. Consider using the pre-converted ones instead.")
 
 retrace = True
 if retrace:
@@ -49,7 +58,7 @@ def op_selector(op):
 compute_precision=ct.precision.FLOAT16
 if model_name == "gpt2":
     print("Using float32 for layer_norm otherwise the precision lost is too large.")
-    print("Larger models can use all float16.")
+    print("Larger models can use all float16.") #... and run purely on the neural engine.
     compute_precision=ct.transform.FP16ComputePrecision(op_selector)
 mlmodel = ct.convert(
     traced_token_predictor,
@@ -93,18 +102,17 @@ with torch.no_grad():
     og_out = token_predictor(input_ids).to(torch.float32)
     tr_out = traced_token_predictor(input_ids).to(torch.float32)
 input_ids = input_ids.int()
-print("predicting on mlmodel", input_ids.shape, input_ids.dtype)
+print("predicting with mlmodel")#, input_ids.shape, input_ids.dtype)
 cm_out = mlmodel.predict({"input_ids": input_ids.numpy()})
 cm_out = torch.from_numpy(cm_out["logits"]).to(torch.float32)
-print("predicted")
 
 assert og_out.shape == cm_out.shape, f"{og_out.shape} != {cm_out.shape}"
 assert og_out.dtype == cm_out.dtype, f"{og_out.dtype} != {cm_out.dtype}"
 
-print("this should be quite high. probably >200 or more.")
-print("traced-original psnr:", compute_psnr(og_out.numpy(), tr_out.numpy()))
-print("\nthese should be >60, ideally much higher.")
+trace_psnr = compute_psnr(og_out, tr_out)
+if trace_psnr < 200:
+    print(f"tracing PSNR too low ({trace_psnr}), CoreML model will likely be unusable")
+
+print("\nthese should be >60, ideally much higher. lower and the model may not be usable")
 print("coreml-traced   psnr:", compute_psnr(tr_out.numpy(), cm_out.numpy()))
 print("coreml-original psnr:", compute_psnr(og_out.numpy(), cm_out.numpy()))
-# np.testing.assert_allclose(og_out.numpy(), tr_out.numpy(), atol=1e-5, rtol=1e-4)
-# np.testing.assert_allclose(cm_out, tr_out.numpy(), atol=1e-5, rtol=1e-4)
