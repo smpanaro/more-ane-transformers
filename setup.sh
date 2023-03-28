@@ -3,7 +3,7 @@
 set -euo pipefail
 
 set +e
-PYTHON_VERSION=$(python -c "import sys; print('.'.join([str(x) for x in sys.version_info[:3]])); sys.exit(0 if sys.version_info[0] == 3 and sys.version_info[1] <= 10 else 1)")
+PYTHON_VERSION=$(python3 -c "import sys; print('.'.join([str(x) for x in sys.version_info[:3]])); sys.exit(0 if sys.version_info[0] == 3 and sys.version_info[1] <= 10 else 1)")
 PYTHON_VERSION_VALID=$?
 set -e
 
@@ -29,7 +29,7 @@ else
       y|Y )
         ;;
       n|N )
-        echo "You can edit this file (line 6 and 42) to replace 'python' references with 'python3.10' or lower and re-run."
+        echo "You can edit this file (line 6 and 42) to replace 'python3' references with 'python3.10' or lower and re-run."
         exit 1
         ;;
       * )
@@ -39,7 +39,7 @@ else
     esac
 fi
 
-python -m venv env
+python3 -m venv env
 echo "Virtualenv created at in env/"
 
 source env/bin/activate

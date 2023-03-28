@@ -6,8 +6,8 @@ Hardware-accelerated transformers on your Mac via CoreML. (Yes, that includes LL
 Generate text with a base gpt2 model like this:
 ```
 ❯ ./setup.sh && source env/bin/activate
-❯ python convert.py
-❯ python generate.py
+❯ python3 convert.py
+❯ python3 generate.py
 Loading model from path gpt2.mlpackage using ComputeUnit.ALL...
 Loaded model in 11.959s.
 
@@ -43,6 +43,6 @@ This project really just stitches together previously open-sourced tools. Thanks
 - [ane-ml-transformers](https://github.com/apple/ml-ane-transformers) - to make CoreML models go fast
 - [nanoGPT](https://github.com/karpathy/nanoGPT) - for a hackable GPT2 implementation
 - [huggingface](https://huggingface.co) - for weights + tokenizers
-- [whisper_ane](https://github.com/Synopsis/whisper_ane) - for another ane example 
+- [whisper_ane](https://github.com/Synopsis/whisper_ane) - for another ane example
 - [Netron](https://netron.app) - for clutch visualization
 - [ChatGPT](http://chat.openai.com) - for bouncing ideas
