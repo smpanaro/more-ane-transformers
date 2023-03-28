@@ -18,10 +18,10 @@ Loaded model in 11.959s.
 **That model is tiny.** You can run larger models too:
 |Model|Parameters|Size|Download|
 |--|--|--|--|
-|gpt2|124M|250MB|soon|
-|gpt2-medium|350M|700MB|soon|
-|gpt2-large|774M|1.5GB|soon|
-|gpt2-xl|1558M|3GB|soon|
+|gpt2|124M|250MB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-march-27)|
+|gpt2-medium|350M|700MB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-march-27)|
+|gpt2-large|774M|1.5GB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-march-27)|
+|gpt2-xl|1558M|3GB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-march-27)|
 
 ## Why CoreML?
 Your Mac has custom hardware built for machine learning (✨the neural engine), but the only way to use it is through CoreML. Apple’s [ane-ml-transformers](https://github.com/apple/ml-ane-transformers) repo has patterns for making them go fast with the Neural Engine, but only one practical end-to-end example. This adds another.
