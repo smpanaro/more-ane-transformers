@@ -84,6 +84,7 @@ mlmodel.short_description = f"{pretty_name} for text generation. Based on nanoGP
 mlmodel.input_description["input_ids"] = "Input tokens. e.g. from the huggingface gpt2 tokenizer. Pad to the full length with 50256 (eos)."
 mlmodel.output_description["logits"] = "Predictions for every element of input_ids in the shape (1, 512, 50257). If your non-padded input length was N, look at index [0][N-1]."
 mlmodel.user_defined_metadata["Converted By"] = "http://twitter.com/flat"
+mlmodel.user_defined_metadata["URL"] = "https://github.com/smpanaro/more-ane-transformers"
 
 suffix = ""
 if compute_precision == ct.precision.FLOAT32:

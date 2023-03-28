@@ -9,6 +9,7 @@ from models.gpt2 import GPT as NanoGPT
 import argparse
 import sys
 import os
+import glob
 from collections import OrderedDict
 
 """
@@ -16,7 +17,6 @@ Load a CoreML model and use it to generate text.
 """
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
-
 
 compute_unit_by_name = OrderedDict([
     ("All", ct.ComputeUnit.ALL),
@@ -27,7 +27,7 @@ compute_unit_by_name = OrderedDict([
 
 parser = argparse.ArgumentParser(description='Load a CoreML modelpackage and generate some text.')
 parser.add_argument('--model_path', help='path to .mlpackage file', default="gpt2.mlpackage", type=str)
-parser.add_argument('--input_prompt', help='input prompt for the model', default="Before boarding your rocket to Mars, remember to pack these items", type=str)
+parser.add_argument('--input_prompt', help='input prompt for the model', default="Before boarding your rocket to Mars, remember to pack these items:", type=str)
 parser.add_argument('--compute_unit', help='compute unit', type=str, choices=list(compute_unit_by_name.keys()), default="All")
 parser.add_argument('--length', help='number of new tokens to generate', type=int, default=40)
 parser.add_argument('--verbose', help='print verbose logs', type=bool, default=False)
@@ -36,6 +36,15 @@ args = parser.parse_args()
 
 if not args.model_path.endswith('.mlpackage'):
     print('Error: Model path must end in .mlpackage')
+
+# Special handling for first-time run.
+if not os.path.exists(args.model_path) and args.model_path == "gpt2.mlpackage":
+    files = glob.glob('gpt2*.mlpackage')
+    files = sorted(files, key=lambda x: os.path.getmtime(x))
+    if len(files) == 0:
+        print(f"Couldn't find {args.model_path}. Either use the --model_path argument or run convert.py to generate one.")
+        sys.exit(1)
+    args.model_path = files[-1]
 
 compute_unit = compute_unit_by_name[args.compute_unit]
 
@@ -117,13 +126,13 @@ for i in range(NUM_INFERENCES):
 
     relevant_tokens = torch.cat((relevant_tokens.squeeze(), torch.tensor([ane_next]))).unsqueeze(0)
     if i == 0:
-        print(f"\n\033[95m{tok.decode(relevant_tokens.squeeze())}\033[0m", end="")
+        print(f"\n\033[95m[Prompt] {tok.decode(relevant_tokens.squeeze())}\033[0m", end="")
     else:
         print(tok.decode(ane_next), end="")
     sys.stdout.flush()
 
 print("\n\n---stats---")
 per_inference = "{:.{}f}ms".format((stopwatch.duration / NUM_INFERENCES) * 1000, 2)
-print(args.compute_unit)
+print("Compute Unit:", args.compute_unit)
 print(stopwatch, "total")
 print(f"{per_inference}/it")
