@@ -3,7 +3,7 @@
 Does what it says on the tin.
 
 ```
-❯ ./setup.sh
+❯ ./setup.sh && source env/bin/activate
 ❯ python convert.py
 ❯ python generate.py
 Loading model from path gpt2.mlpackage using ComputeUnit.ALL...

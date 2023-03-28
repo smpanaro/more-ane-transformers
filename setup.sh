@@ -3,7 +3,7 @@
 set -euo pipefail
 
 set +e
-PYTHON_VERSION=$(python -c "import sys; print('.'.join([str(x) for x in sys.version_info[:3]])); sys.exit(0 if sys.version_info[0] == 3 and sys.version_info[1] <= 9 else 1)")
+PYTHON_VERSION=$(python -c "import sys; print('.'.join([str(x) for x in sys.version_info[:3]])); sys.exit(0 if sys.version_info[0] == 3 and sys.version_info[1] <= 10 else 1)")
 PYTHON_VERSION_VALID=$?
 set -e
 
@@ -24,11 +24,12 @@ esac
 if [[ $PYTHON_VERSION_VALID -eq 0 ]]; then
     echo "Using Python $PYTHON_VERSION"
 else
-    read -p "This project may not work with your Python version (${PYTHON_VERSION}). Continue anyways? (y/n): " choice
+    read -p "This project will probably not work with your Python version (${PYTHON_VERSION}). Try anyways? (y/n): " choice
     case "$choice" in
       y|Y )
         ;;
       n|N )
+        echo "You can edit this file (line 6 and 42) to replace 'python' references with 'python3.10' or lower and re-run."
         exit 1
         ;;
       * )
@@ -46,5 +47,4 @@ echo "Activated virtualenv"
 
 echo "Installing dependencies..."
 pip install -r requirements.txt
-echo -e "All set! \U1F42C"
-
+printf "All set! \360\237\220\254\n"
