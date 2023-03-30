@@ -1,4 +1,5 @@
 from src.ml_ane_transformers.ane_gpt2 import GPT as AneGPT
+from src.utils.model_proxy import MLModelProxy
 from transformers import AutoTokenizer
 import torch
 import torch.nn.functional as F
@@ -34,8 +35,9 @@ parser.add_argument('--verbose', help='print verbose logs', type=bool, default=F
 
 args = parser.parse_args()
 
-if not args.model_path.endswith('.mlpackage'):
-    print('Error: Model path must end in .mlpackage')
+if not args.model_path.endswith('.mlpackage') and not args.model_path.endswith('.mlmodelc') :
+    print('Error: Model path must end in .mlpackage (or .mlmodelc if you know what you\'re doing)')
+    sys.exit(1)
 
 # Special handling for first-time run.
 if not os.path.exists(args.model_path) and args.model_path == "gpt2.mlpackage":
@@ -60,7 +62,11 @@ vprint("Loaded tokenizer.")
 # nano = NanoGPT.from_pretrained("gpt2").eval()
 print(f"Loading model from path {args.model_path} using {compute_unit}...")
 load_stopwatch = Stopwatch(3)
-model = ct.models.model.MLModel(args.model_path, compute_units=compute_unit)
+model = None
+if args.model_path.endswith("mlmodelc"):
+    model = MLModelProxy(args.model_path, compute_unit)
+else:
+    model = ct.models.model.MLModel(args.model_path, compute_units=compute_unit)
 load_stopwatch.stop()
 print(f"Loaded model in {load_stopwatch}.")
 # print(model)
