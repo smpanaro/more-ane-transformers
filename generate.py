@@ -12,6 +12,7 @@ import sys
 import os
 import glob
 from collections import OrderedDict
+import subprocess
 
 """
 Load a CoreML model and use it to generate text.
@@ -33,6 +34,7 @@ parser.add_argument('--compute_unit', help='compute unit', type=str, choices=lis
 parser.add_argument('--length', help='number of new tokens to generate', type=int, default=40)
 parser.add_argument('--verbose', help='print verbose logs', type=bool, default=False)
 parser.add_argument('--wait', help='wait for confirmation before loading the model (ie to attach a debugger)', action="store_true")
+parser.add_argument('--use-mlpackage', help='don\'t automatically generate a mlmodelc and use it. dramatically slower but useful for debugging this script.', action="store_true")
 
 args = parser.parse_args()
 
@@ -63,14 +65,43 @@ vprint("Loaded tokenizer.")
 if args.wait:
     input("Press Enter to continue.")
 
+# Compile to make generations 2-n much much faster.
+base_path = args.model_path.replace(".mlpackage/", "").replace(".mlmodelc/", "").replace(".mlpackage", "").replace(".mlmodelc", "")
+mlpackage_path = base_path + ".mlpackage"
+mlmodelc_path = base_path + ".mlmodelc"
+has_compiled_model = os.path.exists(mlmodelc_path)
+if not has_compiled_model:
+    # Looking to turn this off? As far as I know it's not worth it.
+    # Generating text from a mlpackage does this same compilation every time (slow) and
+    # it doesn't get cached so you will actually use _more_ disk space without this.
+    # It's also much faster to load the model this way. For the xl model this will
+    # take model loading from 1.5 minutes to 2.5 seconds.
+    print("Compiling model. This first run will be slow but all subsequent runs will be significantly faster.")
+    cmd = f"xcrun coremlcompiler compile {mlpackage_path} ."
+    compile_result = subprocess.run(cmd, shell=True)
+    has_compiled_model = compile_result.returncode == 0
+    if not has_compiled_model:
+        print("Failed to compile. Please open an issue (https://github.com/smpanaro/more-ane-transformers/issues) and include the following:")
+        print(f"code: {compile_result.returncode}\nstdout: {compile_result.stdout}\nstderr: {compile_result.stderr}")
+        print("Predicting using the (slow) mlpackage method.")
+
+if has_compiled_model and not os.path.exists(mlpackage_path):
+    # TODO: Dump metadata to disk instead so you can keep just the compiled model.
+    print(f"No matching mlpackage found for {mlmodelc_path}. Can't predict without that.")
+    print(f"It should be at: {mlpackage_path}")
+    sys.exit(1)
+
 # nano = NanoGPT.from_pretrained("gpt2").eval()
-print(f"Loading model from path {args.model_path} using {compute_unit}...")
+print(f"Loading model from path {mlmodelc_path if has_compiled_model else mlpackage_path} using {compute_unit}...")
 load_stopwatch = Stopwatch(3)
-model = None
-if args.model_path.endswith("mlmodelc"):
-    model = MLModelProxy(args.model_path, compute_unit)
+model, model_with_metadata = None, None
+if has_compiled_model:
+    model = MLModelProxy(mlmodelc_path, compute_unit)
+    # So we can inspect and see what the inputs are.
+    model_with_metadata = ct.models.model.MLModel(mlpackage_path, compute_units=compute_unit, skip_model_load=True)
 else:
-    model = ct.models.model.MLModel(args.model_path, compute_units=compute_unit)
+    model = ct.models.model.MLModel(mlpackage_path, compute_units=compute_unit)
+    model_with_metadata = model
 load_stopwatch.stop()
 print(f"Loaded model in {load_stopwatch}.")
 # print(model)
@@ -114,21 +145,27 @@ stopwatch.reset()
 
 NUM_INFERENCES = args.length
 
+input_keys = set([f.name for f in model_with_metadata.input_description._fd_spec])
+
 relevant_tokens = without_pad(ane_inputs["input_ids"])
 for i in range(NUM_INFERENCES):
     next_index = len(relevant_tokens[0]) - 1
     ane_inputs = AneGPT.build_inputs(relevant_tokens, pad_to_length=512, pad_token_id=tok.pad_token_id)
+    ane_inputs = {k:v for k,v in ane_inputs.items() if k in input_keys}
 
     # attention_mask = ane_inputs["k_mask"].squeeze().unsqueeze(0)
     # print(attention_mask.shape)
     stopwatch.start()
     # Hanging here? It's very likely your intputs are the wrong shape and/or types.
-    # logits = model.predict(ane_inputs)["logits"]
-    logits = model.predict({"input_ids": ane_inputs["input_ids"]})["logits"] # nano
+    logits = model.predict(ane_inputs)["logits"] # nano
     # logits = nano(ane_inputs["input_ids"], attention_mask)
     stopwatch.stop()
 
-    ane_next = sample(logits[:, [next_index], :]) #ane_inputs['input_ids'], qk_mask=ane_inputs['qk_mask']))
+    # If the model does not pre-select the next token logits, do so now.
+    if logits.shape[1] > 1:
+        logits = logits[:, [next_index], :]
+
+    ane_next = sample(logits) #ane_inputs['input_ids'], qk_mask=ane_inputs['qk_mask']))
 
     # Helpful for debugging nonsense generations.
     # print(torch.topk(torch.from_numpy(logits), 20, dim=-1).indices[:, :20, :])

@@ -181,7 +181,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, attention_mask=None):
+    def forward(self, idx, output_mask=None):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -197,12 +197,14 @@ class GPT(nn.Module):
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
             x = block(x, attention_mask)
+
+        # No need to compute anything else for the other length-1 tokens.
+        # This shaves ~30% off of gpt2-xl when running on CPU+ANE.
+        if output_mask is not None:
+            x = torch.index_select(x, 1, output_mask)
+
         x = self.transformer.ln_f(x)
 
-        # ANE TODO: Only return the next token logits (see output_mask for an example).
-        # ANE TODO: Try doing this before ln_f (or even before the last FFN of the last layer).
-        #           Think it will help since it seems like lm_head gets sent to CPU but most
-        #           of that is thrown out.
         logits = self.lm_head(x)
 
         return logits

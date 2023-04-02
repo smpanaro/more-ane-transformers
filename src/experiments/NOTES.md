@@ -155,3 +155,6 @@ Something to look into. There's ~200ms of CPU happening in between ANE predictio
 (April 2) Looked closer and pretty sure it's that the lm_head linear layer gets done on the CPU (why??) and is just really slow. Can see in instruments that it's doing a bunch of BNNS inner products that take up almost the whole time. Some ideas for that, but later.
 
 ### April 2, 2023
+Yeah... turns out that linear layer takes 30% of the whole prediction time. Selecting just the next token before lm_head actually keeps it in the ANE! Now xl runs in 450ms/token and ~all (except for the first couple ops) on ANE.
+
+Couple options for what's next: sparsification (hard + not sure I fully grok), kv caching (hard + kinda grok), push pipelines to find the limit. The pythia family of models seems intriguing (there's a 2.7b instruct tuned variant on HF which would be cool).

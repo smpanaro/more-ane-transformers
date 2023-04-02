@@ -5,6 +5,7 @@ import numpy as np
 from datetime import datetime
 from models.gpt2 import GPT
 from src.utils.psnr import compute_psnr
+from src.utils.trace_warnings import silence_known_trace_warnings
 import argparse
 
 """
@@ -32,8 +33,10 @@ if retrace:
     token_predictor = GPT.from_pretrained(model_name).eval()
 
     input_ids = torch.randint(10000, (1,512,))
+    output_mask = torch.randint(512, (1,))
     print(f"Tracing the model with {input_ids.shape}...")
-    traced_token_predictor = torch.jit.trace(token_predictor, (input_ids))
+    with silence_known_trace_warnings(model_name):
+        traced_token_predictor = torch.jit.trace(token_predictor, (input_ids, output_mask))
 else:
     print("Loading from saved file.")
     traced_token_predictor = torch.jit.load(f"{model_filename}.pt")
@@ -64,6 +67,7 @@ mlmodel = ct.convert(
     traced_token_predictor,
     inputs=[
         ct.TensorType(name="input_ids", shape=[1, 512], dtype=np.int32),
+        ct.TensorType(name="output_mask", shape=[1], dtype=np.int32),
     ],
     outputs=[
         ct.TensorType(name="logits", dtype=np.float32),
@@ -82,7 +86,8 @@ pretty_name = {
 }.get(model_name, model_name)
 mlmodel.short_description = f"{pretty_name} for text generation. Based on nanoGPT. Optimized for Apple Neural Engine."
 mlmodel.input_description["input_ids"] = "Input tokens. e.g. from the huggingface gpt2 tokenizer. Pad to the full length with 50256 (eos)."
-mlmodel.output_description["logits"] = "Predictions for every element of input_ids in the shape (1, 512, 50257). If your non-padded input length was N, look at index [0][N-1]."
+mlmodel.input_description["output_mask"] = "A single element array with the index of your sequence to predict. If your non-padded input length was N, pass [N-1]."
+mlmodel.output_description["logits"] = "Predictions for the element of input_ids specified by output_mask in the shape (1, 1, 50257). "
 mlmodel.user_defined_metadata["Converted By"] = "http://twitter.com/flat"
 mlmodel.user_defined_metadata["URL"] = "https://github.com/smpanaro/more-ane-transformers"
 
@@ -100,11 +105,13 @@ to_save.save(f"{model_filename}{suffix}.mlpackage")
 
 # Always compare in float32 so we don't overflow.
 with torch.no_grad():
-    og_out = token_predictor(input_ids).to(torch.float32)
-    tr_out = traced_token_predictor(input_ids).to(torch.float32)
+    og_out = token_predictor(input_ids, output_mask).to(torch.float32)
+    tr_out = traced_token_predictor(input_ids, output_mask).to(torch.float32)
 input_ids = input_ids.int()
+output_mask = output_mask.int()
+# Hanging here? It's very likely your intputs are the wrong shape and/or types.
 print("predicting with mlmodel")#, input_ids.shape, input_ids.dtype)
-cm_out = mlmodel.predict({"input_ids": input_ids.numpy()})
+cm_out = mlmodel.predict({"input_ids": input_ids.numpy(), "output_mask": output_mask.numpy()})
 cm_out = torch.from_numpy(cm_out["logits"]).to(torch.float32)
 
 assert og_out.shape == cm_out.shape, f"{og_out.shape} != {cm_out.shape}"
@@ -114,6 +121,16 @@ trace_psnr = compute_psnr(og_out, tr_out)
 if trace_psnr < 200:
     print(f"tracing PSNR too low ({trace_psnr}), CoreML model will likely be unusable")
 
-print("\nthese should be >60, ideally much higher. lower and the model may not be usable")
+print("\nfinished. these should be >60, ideally much higher. lower and the model may not be usable")
 print("coreml-traced   psnr:", compute_psnr(tr_out.numpy(), cm_out.numpy()))
 print("coreml-original psnr:", compute_psnr(og_out.numpy(), cm_out.numpy()))
+
+if model_name in ["gpt2-xl"]:
+    print("\n👋 This model is big. It will run fast if you have a recent Mac with a fast GPU.")
+    print("If not you can download a version that runs on the Neural Engine from the releases tab on GitHub.")
+    print("If you want to build it yourself follow these steps:")
+    print("1. Install coremltools from source if you have <= version 6.2") # Sorry.
+    print(f"2. Run: python -m src.experiments.chunk_model --mlpackage-path {model_filename}.mlpackage -o .")
+    print("3. Edit src/experiments/make_pipeline.py to use the chunked files written by the above command.")
+    print("4. Run: python -m src.experiments.make_pipeline")
+    print("Use the output *-pipeline.mlpackage with generate.py as usual.")
