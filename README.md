@@ -15,21 +15,23 @@ Loaded model in 11.959s.
 ...
 ```
 
-**That model is tiny.** You can run larger models too:
+**That model is tiny.** Sometimes the results are a bit silly. You can run larger models for better results:
 |Model|Parameters|Size|Download|
 |--|--|--|--|
-|gpt2|124M|250MB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-march-27)|
-|gpt2-medium|350M|700MB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-march-27)|
-|gpt2-large|774M|1.5GB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-march-27)|
-|gpt2-xl|1558M|3GB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-march-27)|
+|gpt2|124M|250MB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-April-02)|
+|gpt2-medium|350M|700MB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-April-02)|
+|gpt2-large|774M|1.5GB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-April-02)|
+|gpt2-xl|1558M|3GB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-April-02)|
 
 ## Why CoreML?
 Your Mac has custom hardware built for machine learning (✨the neural engine), but the only way to use it is through CoreML. Apple’s [ane-ml-transformers](https://github.com/apple/ml-ane-transformers) repo has patterns for making them go fast with the Neural Engine, but only one practical end-to-end example. This adds another.
 
 ## Is it fast?
-The large (770M) model runs *~2 words/sec* running purely on Neural Engine + CPU. *~6 words/sec* if you have a new Mac with a fast GPU. Smaller models are faster, the xl (1.5B) is slower.
+The gpt2-xl (1.5B) model runs *~1.5 words/sec* running purely on Neural Engine. *~2.5 words/sec* if you have a new Mac with a fast GPU. Smaller models are faster (from a little to a lot -- every model is ~2x faster than the next largest).
 
-<img width="1077" alt="Xcode CoreML Performance test for gpt2-large" src="https://user-images.githubusercontent.com/2950214/228109875-84678093-4a96-4f99-9aa1-18d1d3340c25.png">
+<img width="1074" alt="Xcode CoreML Performance test for gpt2-xl" src="https://user-images.githubusercontent.com/2950214/229385079-1ac5ee4c-3531-4e1d-bed3-cb870eee9158.png">
+<sub>note this is prior to a 30% speedup (to 445ms), important part is how purple the bar is :)</sub>
+
 
 ## What about iOS?
 Smaller models (gpt2, maybe gpt2-medium) should run but larger models require too much memory. Quantization doesn’t help because CoreML uses float32 or float16 when running. 🤞 Apple changes this soon.
