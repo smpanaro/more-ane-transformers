@@ -200,6 +200,9 @@ class GPT(nn.Module):
         x = self.transformer.ln_f(x)
 
         # ANE TODO: Only return the next token logits (see output_mask for an example).
+        # ANE TODO: Try doing this before ln_f (or even before the last FFN of the last layer).
+        #           Think it will help since it seems like lm_head gets sent to CPU but most
+        #           of that is thrown out.
         logits = self.lm_head(x)
 
         return logits

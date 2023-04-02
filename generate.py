@@ -32,6 +32,7 @@ parser.add_argument('--input_prompt', help='input prompt for the model', default
 parser.add_argument('--compute_unit', help='compute unit', type=str, choices=list(compute_unit_by_name.keys()), default="All")
 parser.add_argument('--length', help='number of new tokens to generate', type=int, default=40)
 parser.add_argument('--verbose', help='print verbose logs', type=bool, default=False)
+parser.add_argument('--wait', help='wait for confirmation before loading the model (ie to attach a debugger)', action="store_true")
 
 args = parser.parse_args()
 
@@ -58,6 +59,9 @@ vprint("Loading tokenizer...")
 tok = AutoTokenizer.from_pretrained("gpt2")
 tok.pad_token_id = tok.eos_token_id
 vprint("Loaded tokenizer.")
+
+if args.wait:
+    input("Press Enter to continue.")
 
 # nano = NanoGPT.from_pretrained("gpt2").eval()
 print(f"Loading model from path {args.model_path} using {compute_unit}...")
