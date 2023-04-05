@@ -100,7 +100,7 @@ class Chunk():
         mlmodel.save(name)
 
     def __repr__(self):
-        return f"<Chunk start={self.start_op_idx} end={self.end_op_idx} size={self.cumulative_size_in_mb}MB>"
+        return f"<Chunk start={self.start_op_idx} end={self.end_op_idx} cumulative_size={self.cumulative_size_in_mb}MB>"
 
 def _get_op_idx_split_location(prog: Program):
     """ Find the op that approximately bisects the graph as measure by weights size on each side
@@ -160,6 +160,7 @@ def _get_op_idx_split_locations(prog: Program):
             size_in_mb = op.val.val.size * op.val.val.itemsize / (1024 * 1024)
             cumulative_size_in_mb += size_in_mb
 
+        # TODO: Maybe reverse this order?
         if (cumulative_size_in_mb > next_split_size and op.op_type != "const"
                 and len(op.outputs) == 1
                 and len(op.outputs[0].child_ops) == 1):
@@ -167,7 +168,16 @@ def _get_op_idx_split_locations(prog: Program):
             start_op_idx = 0 if len(chunks) == 0 else chunks[-1].end_op_idx
             chunks.append(Chunk(start_op_idx, op_idx, cumulative_size_in_mb))
             next_split_size = cumulative_size_in_mb + chunk_size
+            logger.info(f"current_size = {cumulative_size_in_mb}MB next split size = {next_split_size}MB")
             # return op_idx, cumulative_size_in_mb, total_size_in_mb
+
+    # TODO: Handle more gracefully.
+    op_idx = main_block.operations.index(main_block.operations[-1])
+    start_op_idx = 0 if len(chunks) == 0 else chunks[-1].end_op_idx
+    chunks.append(Chunk(start_op_idx, op_idx, cumulative_size_in_mb))
+    next_split_size = cumulative_size_in_mb + chunk_size
+    logger.info(f"current_size = {cumulative_size_in_mb}MB next split size = {next_split_size}MB")
+
     return chunks
 
 
@@ -221,7 +231,7 @@ def _make_second_chunk_prog(prog, previous_start_op_idx, start_op_idx, end_op_id
     block.opset_version = ct.target.iOS16
 
     # First chunk outputs are second chunk inputs (e.g. skip connections)
-    boundary_vars = _get_first_chunk_outputs(block, previous_start_op_idx, start_op_idx)
+    boundary_vars = _get_first_chunk_outputs(block, 0, start_op_idx)
 
     output_boundary_vars = _get_first_chunk_outputs(block, start_op_idx, end_op_idx)
     if not is_last:
