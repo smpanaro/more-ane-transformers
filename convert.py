@@ -3,10 +3,12 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModel
 import coremltools as ct
 import numpy as np
 from datetime import datetime
-from models.gpt2 import GPT
+from models.gpt2 import GPT as GPT2
+from models.pythia import GPT as Pythia
 from src.utils.psnr import compute_psnr
 from src.utils.trace_warnings import silence_known_trace_warnings
 import argparse
+import gc
 
 """
 Convert a slightly modified nanoGPT to CoreML. Originally intended as
@@ -15,7 +17,7 @@ than the ANE-optimized model and tuned it from there.
 """
 
 parser = argparse.ArgumentParser(description='Convert a model to CoreML.')
-parser.add_argument('--model_name', choices=['gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'], default="gpt2", type=str)
+parser.add_argument('--model_name', choices=['gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl', 'pythia-70m', 'pythia-160m', 'pythia-410m', 'pythia-2.8b', 'pythia-6.9b'], default="gpt2", type=str)
 args = parser.parse_args()
 
 file_suffix = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
@@ -30,7 +32,8 @@ if model_name in ['gpt2-large', 'gpt2-xl']:
 retrace = True
 if retrace:
     print(f"Loading model {model_name}...")
-    token_predictor = GPT.from_pretrained(model_name).eval()
+    model_class = GPT2 if model_name.startswith("gpt2") else Pythia
+    token_predictor = model_class.from_pretrained(model_name).eval()
 
     input_ids = torch.randint(10000, (1,512,))
     output_mask = torch.randint(512, (1,))
@@ -59,7 +62,7 @@ def op_selector(op):
     return op.op_type not in ["layer_norm"]
 
 compute_precision=ct.precision.FLOAT16
-if model_name == "gpt2":
+if model_name in ["gpt2"]:
     print("Using float32 for layer_norm otherwise the precision lost is too large.")
     print("Larger models can use all float16.") #... and run purely on the neural engine.
     compute_precision=ct.transform.FP16ComputePrecision(op_selector)
@@ -77,6 +80,14 @@ mlmodel = ct.convert(
 )
 
 print("Conversion finished.")
+print("Saving...")
+mlmodel.save(f"{model_filename}.mlpackage")
+
+del mlmodel
+gc.collect()
+
+print("Adding metadata...")
+mlmodel = ct.models.MLModel(f"{model_filename}.mlpackage", skip_model_load=True)
 
 pretty_name = {
     "gpt2": "gpt2 (124M)",

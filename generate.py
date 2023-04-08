@@ -58,7 +58,7 @@ def vprint(*pargs, **kwargs):
         print(*pargs, **kwargs)
 
 vprint("Loading tokenizer...")
-tok = AutoTokenizer.from_pretrained("gpt2")
+tok = AutoTokenizer.from_pretrained("gpt2" if args.model_path.startswith("gpt2") else "EleutherAI/pythia-6.9b")
 tok.pad_token_id = tok.eos_token_id
 vprint("Loaded tokenizer.")
 

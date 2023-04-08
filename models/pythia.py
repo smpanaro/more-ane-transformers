@@ -348,7 +348,7 @@ class GPT(nn.Module):
     @classmethod
     def from_pretrained(cls, model_type, override_args=None):
         model_type = model_type.replace('EleutherAI/', '')
-        assert model_type in {'pythia-70m', 'pythia-160m', 'pythia-410m'}
+        assert model_type in {'pythia-70m', 'pythia-160m', 'pythia-410m', 'pythia-2.8b', 'pythia-6.9b'}
         model_type = 'EleutherAI/' + model_type
         override_args = override_args or {} # default to empty dict
         # only dropout can be overridden see more notes below
@@ -361,11 +361,13 @@ class GPT(nn.Module):
             'pythia-70m':      dict(n_layer=6,  n_head=8,  hidden_size=512,  intermediate_size=2048),
             'pythia-160m':     dict(n_layer=12, n_head=12, hidden_size=768,  intermediate_size=3072),
             'pythia-410m':     dict(n_layer=24, n_head=16, hidden_size=1024, intermediate_size=4096),
+            'pythia-2.8b':     dict(n_layer=32, n_head=32, hidden_size=2560, intermediate_size=10240),
+            'pythia-6.9b':     dict(n_layer=32, n_head=32, hidden_size=4096, intermediate_size=16384, vocab_size=50432),
         }[model_type.replace('EleutherAI/', '')]
-        print("forcing vocab_size=50304, block_size=1024, bias=True")
-        config_args['vocab_size'] = 50304 # always 50304 for GPTNeoX model checkpoints
+        # config_args['vocab_size'] = 50432 if model_type in ['pythia-6.9b'] else 50304 # always 50304 for GPTNeoX model checkpoints
         config_args['block_size'] = 1024 # always 1024 for GPT model checkpoints #FIXME
         config_args['bias'] = True # always True for GPT model checkpoints # FIXME
+        print(f"forcing vocab_size={config_args['vocab_size']}, block_size={config_args['block_size']}, bias={config_args['bias']}")
         # create a from-scratch initialized minGPT model
         config = GPTConfig(**config_args)
         model = GPT(config)
@@ -401,7 +403,7 @@ class GPT(nn.Module):
         sd_keys_hf = sd_hf.keys()
         assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
         for k in sd_keys_hf:
-            assert sd_hf[k].shape == sd[k].shape
+            assert sd_hf[k].shape == sd[k].shape, f"{k}: {sd_hf[k].shape} != {sd[k].shape}"
             with torch.no_grad():
                 sd[k].copy_(sd_hf[k])
 
