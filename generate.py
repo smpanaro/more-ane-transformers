@@ -122,7 +122,7 @@ load_stopwatch.stop()
 print(f"Loaded model in {load_stopwatch}.")
 # print(model)
 
-def sample(logits, temperature=0.8, top_k=20):
+def sample(logits, temperature=0.85, top_k=80):
     if isinstance(logits, np.ndarray):
         logits = torch.from_numpy(logits)
     # pluck the logits at the final step and scale by desired temperature
