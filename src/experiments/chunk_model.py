@@ -102,38 +102,6 @@ class Chunk():
     def __repr__(self):
         return f"<Chunk start={self.start_op_idx} end={self.end_op_idx} cumulative_size={self.cumulative_size_in_mb}MB>"
 
-def _get_op_idx_split_location(prog: Program):
-    """ Find the op that approximately bisects the graph as measure by weights size on each side
-    """
-    main_block = prog.functions["main"]
-    total_size_in_mb = 0
-
-    for op in main_block.operations:
-        if op.op_type == "const" and isinstance(op.val.val, np.ndarray):
-            size_in_mb = op.val.val.size * op.val.val.itemsize / (1024 * 1024)
-            total_size_in_mb += size_in_mb
-    if total_size_in_mb < 3072:
-        print("You /may/ not need to split this model in order to get it to run on the Neural Engine.")
-    half_size = 1800 # Under XXGB. 2400 too high. 1800 works.
-    if total_size_in_mb < half_size:
-        half_size = total_size_in_mb / 2
-    print(f"Total size: {total_size_in_mb}MB")
-    print(f"Target split size: {half_size}MB")
-
-    # Find the first non const op (single child), where the total cumulative size exceeds
-    # the half size for the first time
-    cumulative_size_in_mb = 0
-    for op in main_block.operations:
-        if op.op_type == "const" and isinstance(op.val.val, np.ndarray):
-            size_in_mb = op.val.val.size * op.val.val.itemsize / (1024 * 1024)
-            cumulative_size_in_mb += size_in_mb
-
-        if (cumulative_size_in_mb > half_size and op.op_type != "const"
-                and len(op.outputs) == 1
-                and len(op.outputs[0].child_ops) == 1):
-            op_idx = main_block.operations.index(op)
-            return op_idx, cumulative_size_in_mb, total_size_in_mb
-
 def _get_op_idx_split_locations(prog: Program):
     """ Find the op that approximately bisects the graph as measure by weights size on each side
     """
@@ -146,7 +114,8 @@ def _get_op_idx_split_locations(prog: Program):
             total_size_in_mb += size_in_mb
     if total_size_in_mb < 1800:
         print("You /may/ not need to split this model in order to get it to run on the Neural Engine.")
-    chunk_size = 1800 # Under XXGB. 2400 too high. 1800 works.
+    chunk_size = 1800 # Under XXMB. 2400 too high. 1800 works for gpt2-xl.
+    # 670 for 8 chunks of 2.8b
     next_split_size = chunk_size
     print(f"Total size: {total_size_in_mb}MB")
     print(f"Target split size: {chunk_size}MB")
@@ -273,6 +242,7 @@ def _make_second_chunk_prog(prog, previous_start_op_idx, start_op_idx, end_op_id
                 anchor_op=boundary_op,
                 old_var=var,
                 new_var=new_var,
+                # force_replace=True # For quantized models.
             )
 
     PASS_REGISTRY["common::dead_code_elimination"](prog)
@@ -296,30 +266,6 @@ def save_chunk(prog_chunk, filename):
         minimum_deployment_target=ct.target.iOS16, # TODO: Is this needed?
     )
     model_chunk.save(filename)
-
-def _recursively_split_program(prog, model, name, chunk_idx):
-    filename = f"{name}_chunk{chunk_idx}.mlpackage"
-
-    split_res = _get_op_idx_split_location(prog)
-    if split_res is None:
-        logger.info("No need to split further.")
-        save_chunk(prog, filename)
-        logger.info("Saved last chunk")
-        return
-
-    op_idx, first_chunk_weights_size, total_weights_size = split_res
-    main_block = prog.functions["main"]
-    incision_op = main_block.operations[op_idx]
-
-    prog_chunk1 = _make_first_chunk_prog(prog, op_idx)
-    save_chunk(prog_chunk1)
-    del prog_chunk1
-    gc.collect()
-
-    # Build the second chunk
-    # NOTE: this part is where it gets tricky: reloading from the full model isntead of a subset
-    prog_chunk2 = _make_second_chunk_prog(_load_prog_from_mlmodel(model), op_idx)
-    _recursively_split_program(prog_chunk2, model, name, chunk_idx+1)
 
 def main(args):
     os.makedirs(args.o, exist_ok=True)
