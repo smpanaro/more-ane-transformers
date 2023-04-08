@@ -158,3 +158,68 @@ Something to look into. There's ~200ms of CPU happening in between ANE predictio
 Yeah... turns out that linear layer takes 30% of the whole prediction time. Selecting just the next token before lm_head actually keeps it in the ANE! Now xl runs in 450ms/token and ~all (except for the first couple ops) on ANE.
 
 Couple options for what's next: sparsification (hard + not sure I fully grok), kv caching (hard + kinda grok), push pipelines to find the limit. The pythia family of models seems intriguing (there's a 2.7b instruct tuned variant on HF which would be cool).
+
+### April 4, 2023
+Trying pythia-2.8b using the chunked pipeline approach. It seems like only 2 of the 3 or 4 (depending on chunk size) models run on ANE. Can see all of them get loaded in the instruments trace, but maybe some fail? Wondering if it's the conversion to float32 at the end (why does ml-stable-diffusion do that?)
+
+Profiled in Xcode each chunk individually and realized that 1, 3 and 4 all start with matrix_band_part that is not able to run on ANE. Hypothesis: chunk 1 runs on ANE because it sees that the rest of 1 and all of 2 are ANE. But when it gets to 3, it sees that it needs to switch between CPU/ANE then and for 4 and just opts for CPU the whole time. Pretty sure this is the causal mask (band part is a diagonal thing), so maybe can do something to avoid that op.
+
+On the flipside, might be a coincidence, I'm pretty sure my test nets were 100% ANE and they still got pushed to CPU after a certain point.
+
+Trawling the logs, some interesting things. There's definitely some mmap going on. Seems like that's why things go sideways (sometimes): "IODARTVMAllocatorGeneric::vmAlloc: VM exhausted".
+
+Suppose we could try quantizing but I'm skeptical.
+
+Not sure I'm reading vm_stat correctly, but it seems like both the pipeline + non-pipeline uses multiples of memory (5GB file -> 20GB non-pipeline, at least 40GB pipelined). Looks like we just run out? I thought the whole point was that you don't though.
+
+Separately, figured I'd gander the logs to see if I can glean anything more about the non-pipeline model. See this from ANECompilerService:
+Error: L2 read symbol does not exist in __OP___OP___OP___OP___OP_mlp_output_1_cast_decomp_1_1_decomp_1_0_nebypass_0_neconv
+ANEC Compiler Input used legacy key names 'NetworkPlistName' 'NetworkPlistPath' - please update to use 'NetworkSourceFileName' 'NetworkSourcePath'
+
+Could also try reading the MIL and/or generated proto to see if anything looks odd. The fact that it compiles to mlmodelc strangely is definitely sus (maybe worth an issue on coremltools?). (Update 4/5 filed and issue and they're looking.)
+
+### April 5, 2023
+Thinking quantization is worth another shot. Since NE mmaps, if it mmaps the quantized values (kind of sounds like it might) then we're probably in a great spot. Still gonna file some issues / radars.
+Oof, chunk script doesn't work with the ops inserted by quantization.
+
+Failed to load the quantized model, guessing its: "Illegal offset = -2144766976" from ANE Compiler Service
+...coremltools/converters/mil/mil/passes/compression_passes.py:418: RuntimeWarning: invalid value encountered in divide
+  params.quantized_data = np.round(val * (q_val_max - q_val_min) / (val_max - val_min)).astype(np_dtype)
+...coremltools/converters/mil/mil/passes/compression_passes.py:418: RuntimeWarning: invalid value encountered in cast
+  params.quantized_data = np.round(val * (q_val_max - q_val_min) / (val_max - val_min)).astype(np_dtype)
+
+Noticed I have more free pages today, so trying the pipeline model again just in case. No luck.
+
+Looking at https://github.com/eiln/ane/blob/624f5755eb9e7af55b3c4cce6f166c0ee27cc4d1/ane/src/ane.c#L635 which is a linux driver for ANE. It specifies the vm size as 0xe0000000 which is 3.758096384 GB. gpt2-xl is 3.28GB and pythia2.8b is 5.55 so that being the threshold seems plausible. However that code also implies that the T6000 (m1 pro) has 2 ANEs. Wonder how to confirm that. Ha, same person summarized them: https://gist.github.com/eiln/82406a83dc94019d7ffaed7d2e04f120 Seems I do have 2. `ioreg` only shows one though. Mine definitely lines up with the m1 pro in that table. Bummer. Yeah, sounds like the other ANEs are inoperable: https://news.ycombinator.com/item?id=30852818 - wonder if the M2s have a bigger vm_size (`ioreg -c AppleARMIODevice | grep dart-ane -A 20`).
+
+Theoretically could squeeze 4bit 7B param model in there but that's it. And that's assuming that the translation happens at runtime. Pruning plus sparsity could maybe squeeze out a little more? Plus throwing the GPU in there (wonder what the limit is on that).
+
+Was curious and did a sysdiagnose on my phone which dumped the ioreg. Interestingly, "vm-size" = <000000e0>, "ane-type" = <20000000> (<60000000> on my mac, which is type 96 so guessing that's 0x60, which is consistent with 0xe0000000 being 3.75GBish. 0x20 => 32 so lower than the 2020 M1 ~ seems about right).
+
+Just spitballing, but maybe splitting the model up into chunks helped fit it in the available space? Guess the next thing is to get chunking working with quantization and see if that helps memory :crossed-fingers:
+
+### April 6, 2023
+Don't think the "Illegal offset = -2144766976" issue is due to the division. Get the same error with palettize/lookuptable option. Again, suspiciously close to 2^31. Weird to hit that with a 1.4GB file though, maybe something about how it's quantized?
+
+Have been slowly chunking the 4bit quantized model smaller and smaller to see if there's a point where it runs on the ANE. At 7 chunks I hit the vmAlloc issue again. Fewer chunks (aka larger chunks) and only some would run on the ANE. Possible I'm generating corrupt models (I set force_replace to True during chunking to get past some errors) but they generate identical outputs to the non-chunked when run on CPU.
+
+### April 7, 2023
+Searching for the limits of ANE again. Chunked pythia-2.8b 4bit into 12 pieces (each ~100MB). As a pipeline, it fails with the generic "Error computing NN outputs". Tested each piece in Xcode and they are all 100% ANE except for the first and last, which is consistent with smaller models. Tried making smaller pipelines from the chunks and seeing where that falls over.
+4,5,6 - 350ms 100% ANE, 350MB (~1.4GB dequant)
+3,4,5,6,7,8 - failed in Xcode, 708MB (~2.8GB dequant)
+1,2,3,4,5,6 - 627ms, from CLI all chunks ran on ANE with slivers of CPU in between, 704MB (~2.8GB)
+1,2,3,4,5,6,7,8,9,10 - "Error computing NN outputs." from CLI, 1.18GB (~4.7GB dequant)
+1,2,3,4,5,6,7,8,9 - 1000s, from CLI all chunks on ANE w/CPU in between, 1.06GB (~4.24GB dequant)
+One wildcard still is the potential that the generated pipeliens are wrong, but that seems unlikely at this point.
+
+Don't really know what to make of the 1-9 chunk pipeline. I wonder if some of the chunks are op and/or weight equivalent? Whoa.. what if those got cached by ANE? That doesn't make sense... obviously weights are different. Looking at the weights and they really are 1.06GB. Looking closer at the logs " IODARTMapper::iovmMapMemory: Map request failed (0xe00002bd) " -- suspicously right above the 0xe0000000 -- couple lines before VM exhausted.
+
+Think I can explain the 4.24GB being > 3.75. The initial few ops in chunk 1 are actually fairly large (~250MB just for the gather). Wouldn't surprise me if that is the delta since those run on CPU not ANE.
+
+So I think we're basically at the end of this road. Your model needs to be under 3.75GB (with a little breathing room) and even then you may need to split it into pieces. Larger than that and the hardware just doesn't support it.
+
+Could give the manual pipelining another shot but my hunch is that you would have to actually unload/reload the models in ANE each time and I would be shocked if that wasn't on the order of seconds.
+
+So for bigger models, seems like all ANE isn't a option. GPU is fast as blazes anyways, so maybe interesting to see if we can coax CoreML to use both? It doesn't seem willing to automatically if the model is too big for ANE. Maybe better to just start with GPU and look into KV caching?
+
+Sidebar, thinking that the way to decode the ioreg vm-size is to flip the endian-ness. "vm-size" = <000000e0> => 0xE0000000 which lines up with that linux driver. If so, that means the M2 Air is "vm-size" = <0000ffff07000000> => 34.3GB(!). Will have to see.
