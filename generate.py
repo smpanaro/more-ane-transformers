@@ -6,7 +6,8 @@ import torch.nn.functional as F
 import numpy as np
 import coremltools as ct
 from stopwatch import Stopwatch
-from models.gpt2 import GPT as NanoGPT
+from models.gpt2 import GPT as GPT2
+from models.pythia import GPT as Pythia
 import argparse
 import sys
 import os
@@ -57,8 +58,23 @@ def vprint(*pargs, **kwargs):
     if args.verbose:
         print(*pargs, **kwargs)
 
+def get_tokenizer_name(model_path):
+    names = GPT2.model_names() + Pythia.model_names()
+    tokenizer_lookup = {**GPT2.tokenizer_by_name(), **Pythia.tokenizer_by_name()}
+    for n in sorted(names, key=len):
+        if model_path.startswith(n):
+            return tokenizer_lookup[n]
+    print(f"No tokenizer found for {model_path}")
+    print(f"Model name must start with one of:")
+    print(names)
+    return None
+
+tokenizer_name = get_tokenizer_name(args.model_path)
+if tokenizer_name is None:
+    sys.exit(1)
+
 vprint("Loading tokenizer...")
-tok = AutoTokenizer.from_pretrained("gpt2" if args.model_path.startswith("gpt2") else "EleutherAI/pythia-6.9b")
+tok = AutoTokenizer.from_pretrained(tokenizer_name)
 tok.pad_token_id = tok.eos_token_id
 vprint("Loaded tokenizer.")
 

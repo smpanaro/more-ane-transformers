@@ -9,6 +9,7 @@ from src.utils.psnr import compute_psnr
 from src.utils.trace_warnings import silence_known_trace_warnings
 import argparse
 import gc
+import sys
 
 """
 Convert a slightly modified nanoGPT to CoreML. Originally intended as
@@ -16,8 +17,11 @@ a performance baseline (hence the filename) but realized this is faster
 than the ANE-optimized model and tuned it from there.
 """
 
+all_names = GPT2.model_names() + Pythia.model_names()
+
 parser = argparse.ArgumentParser(description='Convert a model to CoreML.')
-parser.add_argument('--model_name', choices=['gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl', 'pythia-70m', 'pythia-160m', 'pythia-410m', 'pythia-2.8b', 'pythia-6.9b'], default="gpt2", type=str)
+parser.add_argument('--model_name', choices=all_names, default="gpt2", type=str)
+parser.add_argument('--low_memory', help="use less memory at the cost of being slower. useful for large models.", action="store_true")
 args = parser.parse_args()
 
 file_suffix = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
@@ -66,6 +70,11 @@ if model_name in ["gpt2"]:
     print("Using float32 for layer_norm otherwise the precision lost is too large.")
     print("Larger models can use all float16.") #... and run purely on the neural engine.
     compute_precision=ct.transform.FP16ComputePrecision(op_selector)
+
+if args.low_memory:
+    del token_predictor
+    gc.collect()
+
 mlmodel = ct.convert(
     traced_token_predictor,
     inputs=[
@@ -80,14 +89,19 @@ mlmodel = ct.convert(
 )
 
 print("Conversion finished.")
-print("Saving...")
-mlmodel.save(f"{model_filename}.mlpackage")
 
-del mlmodel
-gc.collect()
+if args.low_memory:
+    del traced_token_predictor
+    gc.collect()
 
-print("Adding metadata...")
-mlmodel = ct.models.MLModel(f"{model_filename}.mlpackage", skip_model_load=True)
+    print("Saving...")
+    mlmodel.save(f"{model_filename}.mlpackage")
+
+    del mlmodel
+    gc.collect()
+
+    print("Adding metadata...")
+    mlmodel = ct.models.MLModel(f"{model_filename}.mlpackage", skip_model_load=True)
 
 pretty_name = {
     "gpt2": "gpt2 (124M)",
@@ -102,17 +116,19 @@ mlmodel.output_description["logits"] = "Predictions for the element of input_ids
 mlmodel.user_defined_metadata["Converted By"] = "http://twitter.com/flat"
 mlmodel.user_defined_metadata["URL"] = "https://github.com/smpanaro/more-ane-transformers"
 
-suffix = ""
-if compute_precision == ct.precision.FLOAT32:
-    suffix="-f32"
-
-print("Saving...")
+if not args.low_memory:
+    print("Saving...")
 
 # Workaround to save metadata: https://github.com/apple/coremltools/issues/1680
 to_save = ct.models.MLModel(mlmodel._spec,
                   weights_dir=mlmodel._weights_dir,
                   is_temp_package=True)
-to_save.save(f"{model_filename}{suffix}.mlpackage")
+to_save.save(f"{model_filename}.mlpackage")
+
+if args.low_memory:
+    print("Skipping model comparison due to low memory mode.")
+    print("Conversion complete.")
+    sys.exit(0)
 
 # Always compare in float32 so we don't overflow.
 with torch.no_grad():

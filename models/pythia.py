@@ -10,6 +10,7 @@ cannot be used for human-facing interactions."
 import math
 import inspect
 from dataclasses import dataclass
+from collections import OrderedDict
 
 import torch
 import torch.nn as nn
@@ -345,10 +346,28 @@ class GPT(nn.Module):
 
         return logits
 
+    @staticmethod
+    def config_args():
+        return OrderedDict({
+            'pythia-70m':      dict(n_layer=6,  n_head=8,  hidden_size=512,  intermediate_size=2048),
+            'pythia-160m':     dict(n_layer=12, n_head=12, hidden_size=768,  intermediate_size=3072),
+            'pythia-410m':     dict(n_layer=24, n_head=16, hidden_size=1024, intermediate_size=4096),
+            'pythia-2.8b':     dict(n_layer=32, n_head=32, hidden_size=2560, intermediate_size=10240),
+            'pythia-6.9b':     dict(n_layer=32, n_head=32, hidden_size=4096, intermediate_size=16384, vocab_size=50432),
+        })
+
+    @staticmethod
+    def model_names():
+        return list(GPT.config_args().keys())
+
+    @staticmethod
+    def tokenizer_by_name():
+        return {n:f"EleutherAI/{n}" for n in GPT.model_names()}
+
     @classmethod
     def from_pretrained(cls, model_type, override_args=None):
         model_type = model_type.replace('EleutherAI/', '')
-        assert model_type in {'pythia-70m', 'pythia-160m', 'pythia-410m', 'pythia-2.8b', 'pythia-6.9b'}
+        assert model_type in GPT.model_names()
         model_type = 'EleutherAI/' + model_type
         override_args = override_args or {} # default to empty dict
         # only dropout can be overridden see more notes below
@@ -357,23 +376,17 @@ class GPT(nn.Module):
         print("loading weights from pretrained gpt: %s" % model_type)
 
         # n_layer, n_head and hidden_size are determined from model_type
-        config_args = {
-            'pythia-70m':      dict(n_layer=6,  n_head=8,  hidden_size=512,  intermediate_size=2048),
-            'pythia-160m':     dict(n_layer=12, n_head=12, hidden_size=768,  intermediate_size=3072),
-            'pythia-410m':     dict(n_layer=24, n_head=16, hidden_size=1024, intermediate_size=4096),
-            'pythia-2.8b':     dict(n_layer=32, n_head=32, hidden_size=2560, intermediate_size=10240),
-            'pythia-6.9b':     dict(n_layer=32, n_head=32, hidden_size=4096, intermediate_size=16384, vocab_size=50432),
-        }[model_type.replace('EleutherAI/', '')]
+        config_args = GPT.config_args()[model_type.replace('EleutherAI/', '')]
         # config_args['vocab_size'] = 50432 if model_type in ['pythia-6.9b'] else 50304 # always 50304 for GPTNeoX model checkpoints
         config_args['block_size'] = 1024 # always 1024 for GPT model checkpoints #FIXME
         config_args['bias'] = True # always True for GPT model checkpoints # FIXME
-        print(f"forcing vocab_size={config_args['vocab_size']}, block_size={config_args['block_size']}, bias={config_args['bias']}")
+        print(f"forcing block_size={config_args['block_size']}, bias={config_args['bias']}")
         # create a from-scratch initialized minGPT model
         config = GPTConfig(**config_args)
         model = GPT(config)
         sd = model.state_dict()
         sd_keys = sd.keys()
-        sd_keys = [k for k in sd_keys if not k.endswith('.foo')] # discard this mask / buffer, not a param
+        sd_keys = [k for k in sd_keys]
 
         # init a huggingface/transformers model
         model_hf = GPTNeoXForCausalLM.from_pretrained(model_type)
