@@ -2,6 +2,8 @@
 import Foundation
 import CoreML
 
+// Note: This is equivalent to the `xcrun coremlcompiler` CLI tool.
+
 func main(modelPath: String) -> Int32 {
     let allowedFileTypes = Set<String>([".mlpackage", ".neuralnetwork"])
     let modelUrl = URL(filePath: modelPath)

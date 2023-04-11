@@ -1,5 +1,7 @@
 import CoreML
 
+// CLI to test if using models from Swift is faster than Python.
+
 @available(macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, *)
 class Input : MLFeatureProvider {
 
