@@ -12,9 +12,7 @@ import gc
 import sys
 
 """
-Convert a slightly modified nanoGPT to CoreML. Originally intended as
-a performance baseline (hence the filename) but realized this is faster
-than the ANE-optimized model and tuned it from there.
+Convert a slightly modified nanoGPT or Huggingface pythia to CoreML.
 """
 
 all_names = GPT2.model_names() + Pythia.model_names()
@@ -148,7 +146,7 @@ trace_psnr = compute_psnr(og_out, tr_out)
 if trace_psnr < 200:
     print(f"tracing PSNR too low ({trace_psnr}), CoreML model will likely be unusable")
 
-print("\nfinished. these should be >60, ideally much higher. lower and the model may not be usable")
+print("\nfinished. these should be >60, ideally much higher (inf is perfect). lower and the model may not be usable")
 print("coreml-traced   psnr:", compute_psnr(tr_out.numpy(), cm_out.numpy()))
 print("coreml-original psnr:", compute_psnr(og_out.numpy(), cm_out.numpy()))
 
