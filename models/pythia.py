@@ -76,14 +76,6 @@ class CausalSelfAttention(nn.Module):
         self.hidden_size = config.hidden_size
         self.head_size = self.hidden_size // self.n_head
         self.rotary_ndims = int(self.head_size * config.rotary_pct)
-        # max_positions = config.max_position_embeddings
-        # self.register_buffer(
-        #     "bias",
-        #     torch.tril(torch.ones((max_positions, max_positions), dtype=torch.bool)).view(
-        #         1, 1, max_positions, max_positions
-        #     ),
-        # )
-        # self.register_buffer("masked_bias", torch.tensor(-1e9))
         self.rotary_emb = RotaryEmbedding(
             self.rotary_ndims, config.max_position_embeddings, base=config.rotary_emb_base
         )
@@ -117,7 +109,6 @@ class CausalSelfAttention(nn.Module):
         return tensor
 
     def forward(self, x, position_ids, attention_mask):
-        # assert x.shape == torch.Size([1, 11,512]), x.shape
         # Compute QKV
         # Attention heads [batch, seq_len, hidden_size]
         #   --> [batch, seq_len, (np * 3 * head_size)]
@@ -183,23 +174,12 @@ class CausalSelfAttention(nn.Module):
         )
         attn_scores = attn_scores.view(batch_size, num_attention_heads, query_length, key_length)
 
-        # mask_value = torch.finfo(attn_scores.dtype).min
-        # # Need to be a tensor, otherwise we get error: `RuntimeError: expected scalar type float but found double`.
-        # # Need to be on the same device, otherwise `RuntimeError: ..., x and y to be on the same device`
-        # mask_value = torch.tensor(mask_value, dtype=attn_scores.dtype).to(attn_scores.device)
-        # attn_scores = torch.where(causal_mask, attn_scores, mask_value)
-        # FIXME: Add attention_mask
-
         if attention_mask is not None:
             # Apply the attention mask
             attn_scores = attn_scores + attention_mask
 
         attn_weights = nn.functional.softmax(attn_scores, dim=-1)
         attn_weights = attn_weights.to(value.dtype)
-
-        # Mask heads if we want to
-        # if head_mask is not None:
-        #     attn_weights = attn_weights * head_mask
 
         attn_output = torch.matmul(attn_weights, value)
         return attn_output, attn_weights
@@ -318,8 +298,6 @@ class GPT(nn.Module):
         params are actually used as weights in the final layer, so we include them.
         """
         n_params = sum(p.numel() for p in self.parameters())
-        # if non_embedding:
-        #     n_params -= self.transformer.wpe.weight.numel()
         return n_params
 
     def _init_weights(self, module):
@@ -391,11 +369,8 @@ class GPT(nn.Module):
 
         # n_layer, n_head and hidden_size are determined from model_type
         config_args = GPT.config_args()[model_type.replace('EleutherAI/', '')]
-        # config_args['vocab_size'] = 50432 if model_type in ['pythia-6.9b'] else 50304 # always 50304 for GPTNeoX model checkpoints
-        config_args['block_size'] = 1024 # always 1024 for GPT model checkpoints #FIXME
-        config_args['bias'] = True # always True for GPT model checkpoints # FIXME
-        print(f"forcing block_size={config_args['block_size']}, bias={config_args['bias']}")
-        # create a from-scratch initialized minGPT model
+
+        # create a from-scratch initialized model
         config = GPTConfig(**config_args)
         model = GPT(config)
         sd = model.state_dict()
@@ -441,7 +416,7 @@ if __name__ == "__main__":
     from transformers import GPTNeoXForCausalLM, AutoTokenizer
     from src.utils.psnr import compute_psnr
     parser = argparse.ArgumentParser(description='Convert a model to CoreML.')
-    parser.add_argument('--model_name', choices=['pythia-70m', 'pythia-160m'], default="pythia-70m", type=str)
+    parser.add_argument('--model_name', choices=GPT.model_names(), default="pythia-70m", type=str)
     args = parser.parse_args()
 
     model_name = 'EleutherAI/' + args.model_name
