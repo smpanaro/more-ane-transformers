@@ -223,3 +223,16 @@ Could give the manual pipelining another shot but my hunch is that you would hav
 So for bigger models, seems like all ANE isn't a option. GPU is fast as blazes anyways, so maybe interesting to see if we can coax CoreML to use both? It doesn't seem willing to automatically if the model is too big for ANE. Maybe better to just start with GPU and look into KV caching?
 
 Sidebar, thinking that the way to decode the ioreg vm-size is to flip the endian-ness. "vm-size" = <000000e0> => 0xE0000000 which lines up with that linux driver. If so, that means the M2 Air is "vm-size" = <0000ffff07000000> => 34.3GB(!). Will have to see.
+
+### April 9, 2023
+M2 Air
+- gpt2-xl-pipeline: 406ms/it CPU+ANE, 1.3s/it CPU+GPU
+- pythia6.9b: all CPU, would need to chunk
+- pythia2.8b, no chunk: 2.3s/it CPU+GPU
+- gpt2: 163ms/it CPU+ANE (could see some ANE usage in powermetrics, not sure how much), 118ms/it CPU+GPU
+- pythia2.8b, 8 chunks: 1050ms/it CPU+ANE (100% ANE), 2.6s/it CPU+GPU
+
+### April 10, 2023
+2.8b runs 100% on ANE on M2. Cool. Seems like there's a spurt of CPU activity in between each chunk (probably doing the f32<->f16 conversion -- only a couple ms).
+
+Tried 6.9b split into 8 chunks on M2 Air. Only had 16GB of RAM and it swapped to 16GB. It might've finished but I stopped it after 20-30 minutes. So, at a minimum, the M2 seems to be able to hold larger models than the M1 but unclear how much larger (ran out of time to try more).

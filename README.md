@@ -15,7 +15,7 @@ Loaded model in 11.959s.
 ...
 ```
 
-**That model is tiny.** Sometimes the results are a bit silly. You can run larger models for better results:
+That model is tiny—sometimes the results are a bit nonsensical. You can run larger models for better results:
 |Model|Parameters|Size|Download|
 |--|--|--|--|
 |gpt2|124M|250MB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-April-02)|
@@ -23,11 +23,15 @@ Loaded model in 11.959s.
 |gpt2-large|774M|1.5GB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-April-02)|
 |gpt2-xl|1558M|3GB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-April-02)|
 
+You can also see [evals/QUALITY.md](evals/QUALITY.md) for some example generations.
+
 ## Why CoreML?
-Your Mac has custom hardware built for machine learning (✨the neural engine), but the only way to use it is through CoreML. Apple’s [ane-ml-transformers](https://github.com/apple/ml-ane-transformers) repo has patterns for making them go fast with the Neural Engine, but only one practical end-to-end example. This adds another.
+Apple Silicon Macs have custom hardware built for machine learning (✨the neural engine). Its fast and power efficient but the only way to use it is through CoreML. This repo makes it easy.
 
 ## Is it fast?
 The gpt2-xl (1.5B) model runs *~1.5 words/sec* running purely on Neural Engine. *~2.5 words/sec* if you have a new Mac with a fast GPU. Smaller models are faster (from a little to a lot -- every model is ~2x faster than the next largest).
+
+See [evals/SPEED.md](evals/SPEED.md) for device benchmarks.
 
 <img width="1074" alt="Xcode CoreML Performance test for gpt2-xl" src="https://user-images.githubusercontent.com/2950214/229385079-1ac5ee4c-3531-4e1d-bed3-cb870eee9158.png">
 <sub>note this is prior to a 30% speedup (to 445ms), important part is how purple the bar is :)</sub>
