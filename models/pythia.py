@@ -91,34 +91,6 @@ class CausalSelfAttention(nn.Module):
         self.query_key_value = nn.Linear(config.hidden_size, 3 * config.hidden_size)
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
 
-    # def forward(self, x, position_ids, attention_mask):
-    #     B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
-
-    #     # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-    #     q, k ,v  = self.c_attn(x).split(self.n_embd, dim=2)
-    #     k = k.view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
-    #     q = q.view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
-    #     v = v.view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
-
-    #     # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-    #     # manual implementation of attention
-    #     att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-    #     # ANE: Using a stored bias makes the model file larger (from a little to a lot)
-    #     # because it is copied into the model proto for every usage. Additionally, mask
-    #     # fill only runs on the CPU and moving from ANE <-> CPU is sloooow.
-    #     # Instead follow the approach from ml-ane-transformers, subtract a large but
-    #     # float16-friendly value so that masked values are effectively ignored in the softmax.
-    #     # att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-1e4'))
-    #     att = att + attention_mask
-    #     att = F.softmax(att, dim=-1)
-    #     att = self.attn_dropout(att)
-    #     y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-    #     y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
-
-    #     # output projection
-    #     y = self.resid_dropout(self.c_proj(y))
-    #     return y
-
     @classmethod
     def _split_heads(cls, tensor, num_attention_heads, attn_head_size):
         """
@@ -309,7 +281,7 @@ class Block(nn.Module):
 @dataclass
 class GPTConfig:
     block_size: int = 1024
-    vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
+    vocab_size: int = 50304 # Almost all pythia models have the same vocab size.
     n_layer: int = 12
     n_head: int = 12
     hidden_size: int = 512
@@ -392,6 +364,8 @@ class GPT(nn.Module):
             'pythia-70m':      dict(n_layer=6,  n_head=8,  hidden_size=512,  intermediate_size=2048),
             'pythia-160m':     dict(n_layer=12, n_head=12, hidden_size=768,  intermediate_size=3072),
             'pythia-410m':     dict(n_layer=24, n_head=16, hidden_size=1024, intermediate_size=4096),
+            'pythia-1b':       dict(n_layer=16, n_head=8,  hidden_size=2048, intermediate_size=8192),
+            'pythia-1.4b':     dict(n_layer=24, n_head=16, hidden_size=2048, intermediate_size=8192),
             'pythia-2.8b':     dict(n_layer=32, n_head=32, hidden_size=2560, intermediate_size=10240),
             'pythia-6.9b':     dict(n_layer=32, n_head=32, hidden_size=4096, intermediate_size=16384, vocab_size=50432),
         })
@@ -413,7 +387,7 @@ class GPT(nn.Module):
         # only dropout can be overridden see more notes below
         assert all(k == 'dropout' for k in override_args)
         from transformers import GPTNeoXForCausalLM
-        print("loading weights from pretrained gpt: %s" % model_type)
+        print("loading weights from pretrained model: %s" % model_type)
 
         # n_layer, n_head and hidden_size are determined from model_type
         config_args = GPT.config_args()[model_type.replace('EleutherAI/', '')]

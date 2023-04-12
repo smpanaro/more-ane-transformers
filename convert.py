@@ -101,16 +101,22 @@ if args.low_memory:
     print("Adding metadata...")
     mlmodel = ct.models.MLModel(f"{model_filename}.mlpackage", skip_model_load=True)
 
+# TODO: Clean up.
 pretty_name = {
     "gpt2": "gpt2 (124M)",
     "gpt2-medium": "gpt2-medium (350M)",
     "gpt2-large": "gpt2-large (774M)",
     "gpt2-xl": "gpt2-xl (1558M)",
 }.get(model_name, model_name)
-mlmodel.short_description = f"{pretty_name} for text generation. Based on nanoGPT. Optimized for Apple Neural Engine."
-mlmodel.input_description["input_ids"] = "Input tokens. e.g. from the huggingface gpt2 tokenizer. Pad to the full length with 50256 (eos)."
+model_family = [x for x in ["gpt2", "pythia"] if x in model_name][0]
+eos_token_id = {"gpt2": 50256, "pythia": 0}[model_family]
+based_on = {"gpt2": "nanoGPT", "pythia": "the HuggingFace implementation"}[model_family]
+vocab_size = {"gpt2": 50257, "pythia": 50304}[model_family] if model_name != "pythia-6.9b" else 50432
+
+mlmodel.short_description = f"{pretty_name} for text generation. Based on {based_on}. Optimized for Apple Neural Engine."
+mlmodel.input_description["input_ids"] = f"Input tokens. e.g. from the huggingface {model_family} tokenizer. Pad to the full length with {eos_token_id} (eos)."
 mlmodel.input_description["output_mask"] = "A single element array with the index of your sequence to predict. If your non-padded input length was N, pass [N-1]."
-mlmodel.output_description["logits"] = "Predictions for the element of input_ids specified by output_mask in the shape (1, 1, 50257). "
+mlmodel.output_description["logits"] = f"Predictions for the element of input_ids specified by output_mask in the shape (1, 1, {vocab_size}). "
 mlmodel.user_defined_metadata["Converted By"] = "http://twitter.com/flat"
 mlmodel.user_defined_metadata["URL"] = "https://github.com/smpanaro/more-ane-transformers"
 
@@ -154,7 +160,7 @@ if model_name in ["gpt2-xl"]:
     print("\n👋 This model is big. It will run fast if you have a recent Mac with a fast GPU.")
     print("If not you can download a version that runs on the Neural Engine from the releases tab on GitHub.")
     print("If you want to build it yourself follow these steps:")
-    print("1. Install coremltools from source if you have <= version 6.2") # Sorry.
+    print("1. Install coremltools >= 6.3")
     print(f"2. Run: python -m src.experiments.chunk_model --mlpackage-path {model_filename}.mlpackage -o .")
     print("3. Edit src/experiments/make_pipeline.py to use the chunked files written by the above command.")
     print("4. Run: python -m src.experiments.make_pipeline")

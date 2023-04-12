@@ -79,7 +79,8 @@ tok.pad_token_id = tok.eos_token_id
 vprint("Loaded tokenizer.")
 
 if args.wait:
-    input("Press Enter to continue.")
+    print(f"Current PID: {os.getpid()}")
+    input("Waiting. Press Enter to continue.")
 
 # Compile to make generations 2-n much much faster.
 base_path = args.model_path.replace(".mlpackage/", "").replace(".mlmodelc/", "").replace(".mlpackage", "").replace(".mlmodelc", "")
