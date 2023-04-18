@@ -42,7 +42,7 @@ from torch.nn import functional as F
 @dataclass
 class CacheConfig:
     kv_cache: torch.Tensor # [num_layers, 1, 2*seqlen, n_embd]
-    kv_mask: torch.BoolTensor # for masking oldk/oldv [1, seqlen, n_embd], can't build in the model :(
+    kv_mask: torch.BoolTensor # for masking oldk/oldv [1, seqlen, n_embd], can't build in the model (see comments in Attention class)
     output_mask: torch.Tensor # [1]
     head_index: int
 
@@ -93,26 +93,19 @@ class CausalSelfAttention(nn.Module):
         # kv_cache (B, T*2, C)
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
-        # print("x", x[:, :5, :5])
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k ,v  = self.c_attn(x).split(self.n_embd, dim=2)
-        # q,k,v = x,x,x
-
-        # T = q.size()[1]
 
         if kv_config is not None and kv_config.kv_cache is not None:
             kv_cache = kv_config.kv_cache
             kv_mask = kv_config.kv_mask
 
             new_q, new_k, new_v = q,k,v # new_q, new_k, new_v = [B, 1, n_embd]
-            # print("n q,k,v", new_q.shape, new_k.shape, new_v.shape)
             old_k, old_v = kv_cache.chunk(2, dim=1) # each (B, T, C)
             # replace the row indicated by output_mask with the new values
-            # print("old k", old_k.shape)
-            # print("new k", new_k.shape)
-            # print("output_mask", output_mask.shape)
 
             # Many ways to overwrite a row in a matrix (old K) with a new value (new K).
+            # One of them works on ANE.
 
             # op not supported
             # k = torch.index_copy(old_k, 1, output_mask, new_k)
@@ -124,16 +117,12 @@ class CausalSelfAttention(nn.Module):
             # idx = output_mask.repeat(old_k.shape[2]).unsqueeze(0).unsqueeze(0)
             # k = old_k.scatter(1, idx, new_k)
             # v = old_v.scatter(1, idx, new_v)
-            # k = old_k
-            # v = old_v
-
-            # FIXME: Is this equivalent to index_copy?
 
             # Like index_copy but supported by coremltools.
-            # Problem is it creates a symbolic jawn (the :output_mask slicing) which technically
-            # has a different type than the non-cached case.
+            # Problem is it creates a symbolic variable (the :output_mask slicing) which technically
+            # has a different type than the non-cached case, so can't be used in a branched if/else model.
             # Also not sure this is numerically accurate.
-            # And Also doesn't seem to run on the ANE.
+            # And also doesn't seem to run on the ANE.
             # k = torch.cat([old_k[:, :output_mask, :], new_k, old_k[:, output_mask+1:, :]], dim=1)
             # v = torch.cat([old_v[:, :output_mask, :], new_v, old_v[:, output_mask+1:, :]], dim=1)
 
@@ -143,7 +132,7 @@ class CausalSelfAttention(nn.Module):
             # v = old_v
             # v[:, output_mask] = new_v
 
-            # Equivalent to cat dim=1
+            # Equivalent to cat dim=1, same problems.
             # k = torch.hstack([old_k[:, :output_mask, :], new_k, old_k[:, output_mask+1:, :]])
             # v = torch.hstack([old_v[:, :output_mask, :], new_v, old_v[:, output_mask+1:, :]])
 
@@ -154,36 +143,15 @@ class CausalSelfAttention(nn.Module):
             # k = torch.where(mask.bool(), new_k, old_k)
             # v = torch.where(mask.bool(), new_v, old_v)
 
+            # This works, but you have to pass the mask along (on the plus side, you only compute it once).
             k = torch.where(kv_mask, old_k, new_k)
             v = torch.where(kv_mask, old_v, new_v)
-
-
-
             q = new_q
-
-            # if kv_config.head_index == 0:
-            #     print(kv_mask.shape, old_k.shape)
-            #     print(kv_mask[:, :6, :5])
-            #     print("oldk newk prefix")
-            #     print(old_k[:, :6, :5])
-            #     print(new_k[:, :, :5])
-            #     print(k[:, :6, :5])
-            #     print("oldk newk suffix")
-            #     print(old_k[:, :6, -5:])
-            #     print(new_k[:, :, -5:])
-            #     print(k[:, :6, -5:])
 
             B,T,C = k.size()
 
         current_cache = torch.cat([k,v], dim=1)
-        # current_cache = kv_cache
 
-        # print(x.shape, self.c_attn(x).shape)
-        # print(k[:, :7, -5:])
-
-        # print("BTC", B, T, C)
-        # print("final k", k.shape)
-        # print("final q", q.shape)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, q.size()[1], self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
@@ -201,18 +169,14 @@ class CausalSelfAttention(nn.Module):
             # Instead follow the approach from ml-ane-transformers, subtract a large but
             # float16-friendly value so that masked values are effectively ignored in the softmax.
             # att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-1e4'))
-            # print("att.shape", att.shape, attention_mask.shape)
             att = att + attention_mask
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        # print("pre-t y", y.shape)
-        # print("q.shape", q.shape)
         y = y.transpose(1, 2).contiguous().view(B, -1, C) # re-assemble all head outputs side by side
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
-        # print("y", y.shape)
         return y, current_cache
 
 class MLP(nn.Module):
@@ -308,20 +272,15 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, output_mask=None, kv_cache=None, kv_mask=None, seqlen=512):
-
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
 
         pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0) # shape (1, t)
-        # if kv_cache is not None and kv_cache[0] is not None:
-        #     pos = output_mask.unsqueeze(0)
 
         # ANE: Since we are only inferring and we only care about predicting the next token,
         # we can use the same triangular mask always. May need to change this to support flexible sizes.
         attention_mask = (1 - torch.tril(torch.ones((1,1,seqlen,seqlen), dtype=torch.float32))) * -1e4
-        # if kv_cache is not None and kv_cache[0] is not None:
-        #     attention_mask = (1 - torch.tril(torch.ones((1,1,1,seqlen), dtype=torch.float16))) * -1e4
 
         # kv_cache [# layers, batch size 1, seqlen * 2 = 512*2, hidden size 768]
         if kv_cache is None:
@@ -330,14 +289,10 @@ class GPT(nn.Module):
             pos = output_mask.unsqueeze(0)
             attention_mask = torch.index_select(attention_mask, 2, output_mask)
 
-        # print(idx[:, :5])
-
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (1, t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
-
-        # print("x", tok_emb[:, :6, :5])
 
         kv_mask_bool = kv_mask.bool() if kv_mask is not None else None
         new_kv_cache = []
@@ -478,29 +433,34 @@ if __name__ == "__main__":
         return kv_mask
 
     model = GPT.from_pretrained("gpt2").eval()
-    # input_ids = torch.randint(10_000, (1, 10,))
 
-    # with torch.no_grad():
-    #     base_prediction, _ = model(input_ids, torch.tensor([4]), seqlen=10)
-    #     print("^base ------ first v")
+    # Check numeric accuracy before converting to CoreML. It's not exact, might be a bug.
+    # if True:
+    if False:
+        input_ids = torch.randint(10_000, (1, 10,))
 
-    #     out, out_cache = model(input_ids, torch.tensor([3]), seqlen=10)
+        with torch.no_grad():
+            base_prediction, _ = model(input_ids, torch.tensor([4]), seqlen=10)
+            print("^base ------ first v")
 
-    # print("output cache:", out_cache.shape)
+            out, out_cache = model(input_ids, torch.tensor([3]), seqlen=10)
 
-    # print("----")
+        print("output cache:", out_cache.shape)
 
-    # with torch.no_grad():
-    #     out_new, out_new_cache = model(input_ids[:,[4]], torch.tensor([4]), out_cache, seqlen=10)
+        print("----")
 
-    # print(base_prediction[:, 0:6, 0:4])
-    # print(out[:, 0, 0:4])
-    # print(out_new[:, 0, 0:4])
-    # print("cache sizes", out_cache.shape, out_new_cache.shape)
-    # print("eq?", torch.equal(out_new[:, 0, :], base_prediction[:, 0, :])) # why aren't these equal?
-    # print("close?")
-    # np.testing.assert_allclose(out_new[:, 0, :], base_prediction[:, 0 ,:])
+        with torch.no_grad():
+            out_new, out_new_cache = model(input_ids[:,[4]], torch.tensor([4]), out_cache, seqlen=10)
 
+        print(base_prediction[:, 0:6, 0:4])
+        print(out[:, 0, 0:4])
+        print(out_new[:, 0, 0:4])
+        print("cache sizes", out_cache.shape, out_new_cache.shape)
+        print("eq?", torch.equal(out_new[:, 0, :], base_prediction[:, 0, :])) # why aren't these equal?
+        print("close?")
+        np.testing.assert_allclose(out_new[:, 0, :], base_prediction[:, 0 ,:])
+
+    # Work out the pattern what inputs to pass when.
     # if True:
     if False:
         from transformers import AutoTokenizer
@@ -518,20 +478,17 @@ if __name__ == "__main__":
                 seqlen = seq.shape[-1]+i
                 print("i", i, seqlen)
                 inputs = input_ids if kvc is None else input_ids[:, [seqlen-1]]
-                # print("inputs", inputs)
                 output_mask = torch.tensor([seqlen-1])
                 kv_mask = build_kv_mask(output_mask, seqlen=20, hidden_size=768)
                 out, kvc = model(inputs, output_mask=output_mask, kv_cache=kvc, kv_mask=kv_mask, seqlen=20)
                 input_ids[0][seqlen] = out.argmax()
-                # print("input_ids", input_ids)
-                # print("kvc.shape", kvc.shape)
                 outs.append(out)
 
         print(tok.decode(input_ids.squeeze().tolist()))
-        # full_out = model(tok("would the real slim", return_tensors="pt")["input_ids"], seqlen=4)[0]
-        # _, idc = torch.topk(full_out, 10)
-        # print([tok.decode(x) for x in idc[0, -1, :]])
 
+    # Try to build a branching model that can be converted to CoreML.
+    # Doesn't run on the Neural Engine and includes duplicate copies of the weights.
+    # Would also be difficult/impossible to split into a pipeline for gpt2-xl.
     if True:
     # if False:
         import coremltools as ct
@@ -571,7 +528,6 @@ if __name__ == "__main__":
         with torch.no_grad():
             double = DoubleGPT(model_name, seqlen, num_layers, hidden_size).eval()
             # double(input_ids, torch.tensor([3]), torch.ones(num_layers, 1, seqlen*2,hidden_size))
-            # print("AYYYY")
 
             kv_cache_shape = (num_layers, 1, seqlen*2,hidden_size)
             kv_mask = torch.ones(1, seqlen, hidden_size)

@@ -236,3 +236,110 @@ M2 Air
 2.8b runs 100% on ANE on M2. Cool. Seems like there's a spurt of CPU activity in between each chunk (probably doing the f32<->f16 conversion -- only a couple ms).
 
 Tried 6.9b split into 8 chunks on M2 Air. Only had 16GB of RAM and it swapped to 16GB. It might've finished but I stopped it after 20-30 minutes. So, at a minimum, the M2 seems to be able to hold larger models than the M1 but unclear how much larger (ran out of time to try more).
+
+### April 15, 2023
+Have been experimenting with KV caching. Basic idea is to have a fixed size K + V matrix and use masking to cover the irrelevant positions. Flexible sizes don't work on the Neural Engine, so need to do it the harder way. (Should probably check that assumption though.) Currently have 2 models: gpt2-full (no caching) and gpt2-cached (with kv caching), both return kv_caches and only the cached takes one as input. Would be nice to have one model with conditional branching and share the weights -- hit a few issues going that direction so starting simple (disk space is cheaper than speed for now, could always force the full model onto CPU+GPU and leave ANE for cached).
+
+It's a little hard to tell what hardware the cached version is running on (Xcode claims mostly ANE but ~30% CPU) but instruments makes it look all CPU (seems unlikely tbh). But either way the cached version is fast.. 25-30ms/it versus 70ms non-cached baseline (which is mostly ANE but some CPU).
+
+Xcode profiles for gpt2:
+cached: 29ms CPU+ANE (406/467 ANE), 35ms CPUOnly
+full: 36ms CPU+ANE (414/421 ANE), 545ms CPUOnly (!) -- note this is all fp16 unlike the current benchmarks for gpt2 which have fp32 layer norms -- actually surprising that the results are intelligble at all... did I inadvertently fix a bug/break something in a new way?
+
+The stitching of the new K/V with the cached K/V is tricky to do in an ANE-supported way. Currently using scatter which isn't supported. Trying to think of creative alternatives. Seems like slice and concat are also not supported.
+
+Promising approach, build a static mask outside of the model and then use torch.where which works on ANE. Results are gibberish still but feels like an off-by-one. If so, base gpt2 runs on ANE again at 17ms (again all fp16). Fixed the gibberish (mask was inverted oops). gpt2-medium is 38ms cached (down from 103ms).
+
+### April 16, 2023
+Realized that the idea of branching between cached/non-cached models won't work with chunking without something really creative, since I don't think you can split in the middle of if/else. Should probably file a radar for the chunking thing.
+
+Oof, cond (if/else) isn't supported on the Neural Engine. So you basically have to do your branching very high up (outside the model). Otherwise you have to go back to CPU to take the branch (you can see that it converts to f32 even).
+
+pieline options:
+x, cond -> normal -> cached -> out
+=> can't share weights between cached and normal
+=> can split them into chunks. complex but basically each chunk becomes a cond one branch that just forwards the input and a dummy output and the other that forwards the input and the real output. out selects the output
+
+x, cond -> normal --> out
+        -> cached -/
+=> can share weights
+=> can't split
+
+Ideal solution is the Neural Engine allows bigger models.
+
+Another option.. "smart" chunking. When splitting an if, walk both branches in parallel so that shared weights (assuming we figure out how to do that) stay together. Then at the end of the chunk, have two outputs (each branch provides empty versions of the other branch's). The start of the next chunk takes in the superset of outputs plus cond and continues either normal or cached branch picking the appropriate outputs. Complex, but:
+=> shares weights
+=> allows chunking
+
+x, cond -> normal chunk1 --> (normal out1, cached out1) -> normal chunk2 --> out
+        -> cached chunk1-/                              -> cached chunk2-/
+
+Wish there was a way to do this in one linear pass...
+
+Rough notes: one input... [1, n * X, hidden_size]
+first num_layers*2*n are the kv_cache
+next n are the kv_mask
+remainder are the inputs -- need to see if split or chunk support remainders..
+input.chunk(numlayers+numlayers+2, dim=1) retrieves them and is statically sized.
+Fixed sizes are n = (powers of 2) + 1 and 2048 (or whatever the max seq is). First run will have huge matrices, but that's still almost certainly faster than encoding the inputs one at a time (I hope). You always take the KV cache path since even on the first pass it will overwrite the cached values. The KV mask is crucial for this too.
+Embedding has to happen outside of the model as well (can pipeline it though, plus it's stuck on CPU anyways).
+Dang.. using enumerated shapes makes the varied dimensions dynamic (instead of enumerating them like I assumed) so when you try to chunk them (which translates into a split) it fails to calculate the split size.
+This angle still might be interesting when doing the branching model -- can at least enumerate many sizes then... probably (might hit more weirdness with the branching who knows).
+
+Tried a gross hack by overriding how `chunk` is converted. Seems to work, but I bet it's risky and I don't know if it works on ANE.
+
+### April 17, 2023
+Going to change pace for a little to wait and see if there's any update on the weight sharing issue + clear my head. Read something about how ANE performance is less beneficial for small matrices, going to measure the impact on sequence size (e.g. how big the  K and V matrices are, all input tokens are 1). Maybe this path isn't even worth it?
+
+Wow, using the model with the if-statement and CPU-only inference crawls. Oh and it doesn't work on Neural Engine yet, forgot about that. Hmm, even the non-branched is really slow today. Something sus. Trying to figure out what I changed, maybe making inputs f16? Yup.. that, also, interesting, I think I may be including the first prediction in the total and it looks like that is slower. Weird, the second time is the slowest for gpt2. But there is definitely a warm up period of 1-2 predictions.
+
+All times are for a single input token, inferred min(196, seqlen) times and median time per inference. Not using the branched model.
+
+|model      |seq length|CPU   |CPU+NE|NE - No Cache|
+|--|--|--|--|--|
+|gpt        |1024      |79.6ms|40.3ms|             |
+|gpt        |512       |43.2ms|23.7ms|69ms         |
+|gpt        |256       |25.7ms|15.5ms|             |
+|gpt        |128       |16.6ms|11.7ms|             |
+|gpt2-medium|1024      |219ms |112ms|              |
+|gpt2-medium|512       |116ms |62.9ms|103ms        |
+|gpt2-medium|256       |67.9ms|40.1ms|             |
+|gpt2-medium|128       |45.7ms|26.8ms|             |
+|gpt2-medium|16        |26.2ms|20.4ms|             |
+|gpt2-large |1024      |403ms |235ms |             |
+|gpt2-large |512       |226ms |127ms |210ms        |
+|gpt2-large |256       |138ms |78.4ms|             |
+|gpt2-large |128       |94.7ms|53.7ms|             |
+|gpt2-large |16        |55.2ms|37.5ms|             |
+|gpt-xl     |512       |400ms |397ms*|455ms        |
+
+\* consistent with this model not fitting on the Neural Engine.
+
+It seems to be an improvement over CoreML CPU but maybe not over a hand-tuned CPU implementation? Seems plausible -- there are 4bit quantized 7B param models that are 60ms/token.
+
+Unrelated, was trying to narrow down where the PSNR falls off with pythia-410m. Thought it might be specific ops and was trying to find them experimentally:
+
+PSNR with only these ops as f16:
+layer_norm - 79
+add+sub - 76
+gelu - 94
+softmax+const - 86
+softmax - 86
+const - 96
+slice_by_index - 52 (wat)
+mul - 80
+linear - 66
+matmul - 35
+reshape - 47.5 (what)
+concat - 34.8 (wat)
+transpose - 50 wat
+band_part - 96
+gather - 82
+
+Sets of ops as f16:
+'band_part', 'const', 'gelu' - 91
+'gelu', 'layer_norm', 'band_part', 'const', 'gather' - 77
+'gather', 'const', 'band_part', 'gelu' - 86
+'band_part', 'softmax', 'gelu', 'gather', 'const' - 52
+'concat', 'band_part', 'gelu', 'const', 'gather' - 43
+'slice_by_index', 'reshape', 'band_part', 'transpose', 'const', 'concat', 'gather', 'gelu' - 31
