@@ -507,16 +507,16 @@ if __name__ == "__main__":
                 self.full = self.cached
                 input_ids = torch.randint(10_000, (1, seqlen,))
                 kv_cache = torch.zeros(num_layers, 1, seqlen*2,hidden_size)
-                kv_mask = torch.zeros(1, seqlen, hidden_size)
+                kv_mask = torch.ones(1, seqlen, hidden_size)
                 self.cached = torch.jit.trace(self.cached, (input_ids[:, [3]], torch.tensor([3]), kv_cache, kv_mask))
                 self.full = torch.jit.trace(self.full, (input_ids, torch.tensor([3])))
 
             def forward(self, x, output_mask, kv_cache, kv_mask):
-                if kv_cache.min() != 0:
+                if kv_cache.min() == 0:
+                    y, new_cache = self.full(x, output_mask)
+                else:
                     ci = torch.index_select(x, 1, output_mask)
                     y, new_cache = self.cached(ci, output_mask, kv_cache, kv_mask)
-                else:
-                    y, new_cache = self.full(x, output_mask)
 
                 return y, new_cache
 
@@ -526,9 +526,17 @@ if __name__ == "__main__":
         # num_layers = 12
         # hidden_size = 768
 
-        model_name = "gpt2-medium"
-        num_layers = 24
-        hidden_size = 1024
+        # model_name = "gpt2-medium"
+        # num_layers = 24
+        # hidden_size = 1024
+
+        # model_name = "gpt2-large"
+        # num_layers = 36
+        # hidden_size = 1280
+
+        model_name = "gpt2-xl"
+        num_layers = 48
+        hidden_size = 1600
 
         input_ids = torch.randint(10_000, (1, seqlen,))
         # traced_model = torch.jit.trace(model, (input_ids, torch.tensor([3]), torch.zeros(num_layers, 1, seqlen*2,hidden_size)))
@@ -546,12 +554,13 @@ if __name__ == "__main__":
             traced_full_model = torch.jit.trace(double, (input_ids, torch.tensor([3]), torch.zeros(kv_cache_shape), kv_mask))
 
             # Script both models.
-            # traced_model = torch.jit.script(double)
+            # scripted_model = torch.jit.script(double)
 
 
         def convert_model(traced_model, name):
             print(traced_model.code)
             prog = ct.convert(traced_model,
+                # Inputs and outputs must be float32 or performance crawls.
                 inputs=[
                     ct.TensorType(name="input_ids", shape=[1, seqlen], dtype=np.int32),
                     ct.TensorType(name="output_mask", shape=[1], dtype=np.int32),
@@ -563,14 +572,16 @@ if __name__ == "__main__":
                     ct.TensorType(name="new_kv_cache", dtype=np.float32),
                 ],
                 minimum_deployment_target=ct.target.iOS16, # TODO: Is this needed?
-                # compute_units=ct.ComputeUnit.CPU_AND_GPU if "full" in name else ct.ComputeUnit.CPU_AND_NE,
-                compute_precision=ct.precision.FLOAT32,
                 convert_to="milinternal")
 
-            # print(prog)
+            print(prog)
 
             mlmodel = ct.convert(prog,
                                 minimum_deployment_target=ct.target.iOS16, # TODO: Is this needed?
+                                compute_precision=ct.precision.FLOAT16,
+                                # compute_units=ct.ComputeUnit.CPU_AND_GPU if "full" in name else ct.ComputeUnit.CPU_AND_NE,
+                                compute_units=ct.ComputeUnit.CPU_AND_NE,
+                                # compute_units=ct.ComputeUnit.CPU_ONLY,
                                 convert_to="mlprogram")
 
             # print(mlmodel.get_spec().description.input)
@@ -579,12 +590,13 @@ if __name__ == "__main__":
             # mlmodel._spec = spec
             # print(mlmodel.get_spec().description.input)
 
-            # mlmodel.save(f"{name}.mlpackage")
+            mlmodel.save(f"{name}.mlpackage")
             return mlmodel
 
         cached_mlmodel = convert_model(traced_cached_model, "gpt2kv-cached")
         full_mlmodel = convert_model(traced_full_model, "gpt2kv-full")
-        # convert_model(traced_model, "gpt2kv")
+        # scripted_mlmodel = convert_model(scripted_model, "gpt2kv")
+        # full_mlmodel, cached_mlmodel = scripted_mlmodel, scripted_mlmodel
 
         from transformers import AutoTokenizer
         tok = AutoTokenizer.from_pretrained("gpt2")
@@ -598,7 +610,7 @@ if __name__ == "__main__":
             "output_mask": torch.tensor([seq.shape[1]-1]).int().numpy(),
             "kv_cache": torch.zeros((num_layers, 1, 2*seqlen, hidden_size)).float().numpy(),
         }
-        original_inputs["kv_mask"] = build_kv_mask(original_inputs["output_mask"], seqlen=512, hidden_size=hidden_size)
+        original_inputs["kv_mask"] = build_kv_mask(original_inputs["output_mask"], seqlen=seqlen, hidden_size=hidden_size)
         original_outputs = full_mlmodel.predict(original_inputs)
 
         # input("Press Enter to continue.")
@@ -616,6 +628,9 @@ if __name__ == "__main__":
         # print("output_mask", original_inputs["output_mask"])
         outputs = original_outputs
         num_inferences = 0
+
+        inference_times = []
+
         for i in range(min(seqlen, 200) - seq.shape[1]):
             input_stopwatch.start()
             input_ids[0, seq.shape[1]+i] = outputs["logits"].argmax()
@@ -624,15 +639,18 @@ if __name__ == "__main__":
                 "output_mask": torch.tensor([seq.shape[1]+i]).int().numpy(),
                 "kv_cache": outputs["new_kv_cache"], # already numpy floats (from CoreML)
             }
-            inputs["kv_mask"] = build_kv_mask(inputs["output_mask"], seqlen=512, hidden_size=hidden_size) # probably cheating to not include this in timing...
+            inputs["kv_mask"] = build_kv_mask(inputs["output_mask"], seqlen=seqlen, hidden_size=hidden_size) # probably cheating to not include this in timing...
             input_stopwatch.stop()
             # print("input_ids", input_ids)
             # print("output_mask", inputs["output_mask"])
 
+            stopwatch.reset()
             stopwatch.start()
             outputs = cached_mlmodel.predict(inputs)
             # outputs = full_mlmodel.predict(inputs)
             stopwatch.stop()
+            inference_times.append(stopwatch.duration)
+            print(i)
 
             num_inferences += 1
 
@@ -640,13 +658,18 @@ if __name__ == "__main__":
         print("final input_ids", input_ids)
         print(tok.decode(input_ids[0, :]))
 
+        print("inference times", inference_times)
+        inference_times = np.array(inference_times)
         print("\n\n---stats---")
-        per_inference = "{:.{}f}ms".format((stopwatch.duration / num_inferences) * 1000, 2)
-        print(stopwatch, "total")
-        print(f"{per_inference}/it")
+        print("seqlen", seqlen)
+        print("min {:.{}f}ms".format((inference_times.min()) * 1000, 2))
+        print("max {:.{}f}ms".format((inference_times.max()) * 1000, 2))
+        print("mean {:.{}f}ms".format((inference_times.mean()) * 1000, 2))
+        print(f"median {np.median(inference_times)*1000}ms")
 
         input_per_inference = "{:.{}f}ms".format((input_stopwatch.duration / num_inferences) * 1000, 2)
         print(f"input prep {input_per_inference}/it")
+        print("compute unit", cached_mlmodel.compute_unit)
 
 
         # print(prog)
