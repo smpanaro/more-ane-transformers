@@ -27,10 +27,6 @@ file_suffix = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
 model_name = args.model_name
 model_filename = model_name.split("/")[-1] + "_" + file_suffix
 
-if model_name in ['gpt2-large', 'gpt2-xl']:
-    print("WARNING: This model is large and will be slow/impossible to convert without "+
-           "installing a modified version of coremltools. Consider using the pre-converted ones instead.")
-
 retrace = True
 if retrace:
     print(f"Loading model {model_name}...")

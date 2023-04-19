@@ -3,4 +3,5 @@ transformers==4.24.0
 ane-transformers==0.1.3
 stopwatch.py==2.0.1
 scikit-learn==1.1.2
+coremltools>=6.3.0
 
