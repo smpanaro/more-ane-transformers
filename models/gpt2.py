@@ -272,6 +272,9 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, output_mask=None, kv_cache=None, kv_mask=None, seqlen=512):
+        assert kv_cache is None or idx.shape[1] == 1, f"kv cache is only supported for single token inputs not {idx.shape}"
+        return_kv_cache = kv_cache is not None
+
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -314,9 +317,12 @@ class GPT(nn.Module):
 
         # [# layers, batch size 1, seqlen * 2 = 512*2, hidden size 768]
         # same as input
-        new_kv_cache = torch.stack(new_kv_cache) if len(new_kv_cache) > 0 else None
+        new_kv_cache = torch.stack(new_kv_cache)
 
-        return logits, new_kv_cache
+        if return_kv_cache:
+            return logits, new_kv_cache
+
+        return logits
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
