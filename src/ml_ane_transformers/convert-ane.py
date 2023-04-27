@@ -28,7 +28,7 @@ if retrace:
                                             ["input_ids", "qk_mask", "k_mask", "output_mask"]]
     del inputs_dict["k_mask"]
     # Exclude k_mask. It's a no-op for next-token prediction.
-    traced_token_predictor = torch.jit.trace(token_predictor, (input_ids, qk_mask, output_mask))
+    traced_token_predictor = torch.jit.trace(token_predictor, (input_ids, output_mask))
 
     #traced_token_predictor.save(f"{model_filename}.pt")
 else:
@@ -60,7 +60,7 @@ mlmodel = ct.convert(
     traced_token_predictor,
     inputs=[
         ct.TensorType(name="input_ids", shape=[1, 512], dtype=np.int32),
-        ct.TensorType(name="qk_mask", shape=[1, 512, 1, 512], dtype=np.float32),
+        # ct.TensorType(name="qk_mask", shape=[1, 512, 1, 512], dtype=np.float32),
         ct.TensorType(name="output_mask", shape=[1], dtype=np.int32),
     ],
     outputs=[
@@ -83,9 +83,11 @@ mlmodel.save(f"{model_filename}{suffix}-trash-nosplit-allf16.mlpackage")
 
 # Always compare in float32 so we don't overflow.
 with torch.no_grad():
-    og_out = token_predictor(input_ids, qk_mask=qk_mask, output_mask=output_mask).to(torch.float32)
-    tr_out = traced_token_predictor(input_ids, qk_mask=qk_mask, output_mask=output_mask).to(torch.float32)
+    og_out = token_predictor(input_ids, output_mask=output_mask).to(torch.float32)
+    tr_out = traced_token_predictor(input_ids, output_mask=output_mask).to(torch.float32)
 print({k: f"{v.shape}-{v.dtype}" for k,v in inputs_dict.items()})
+del inputs_dict["qk_mask"]
+# del inputs_dict["k_mask"]
 cm_out = mlmodel.predict(inputs_dict)
 cm_out = torch.from_numpy(cm_out["logits"]).to(torch.float32)
 
@@ -94,9 +96,9 @@ assert og_out.dtype == cm_out.dtype, f"{og_out.dtype} != {cm_out.dtype}"
 
 
 print("this should be quite high. probably >200 or more.")
-print("traced-original psnr:", compute_psnr(og_out.numpy(), tr_out.numpy()))
+print("traced-original psnr:", compute_psnr(tr_out.numpy(), og_out.numpy()))
 print("\nthese should be >60, ideally much higher.") # otherwise you're only going to generate gibberish
-print("coreml-traced   psnr:", compute_psnr(tr_out.numpy(), cm_out.numpy()))
-print("coreml-original psnr:", compute_psnr(og_out.numpy(), cm_out.numpy()))
+print("coreml-traced   psnr:", compute_psnr(cm_out.numpy(), tr_out.numpy()))
+print("coreml-original psnr:", compute_psnr(cm_out.numpy(), og_out.numpy()))
 # np.testing.assert_allclose(og_out.numpy(), tr_out.numpy(), atol=1e-5, rtol=1e-4)
 # np.testing.assert_allclose(cm_out, tr_out.numpy(), atol=1e-5, rtol=1e-4)

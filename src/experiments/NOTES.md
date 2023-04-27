@@ -315,6 +315,38 @@ All times are for a single input token, inferred min(196, seqlen) times and medi
 
 \* consistent with this model not fitting on the Neural Engine.
 
+Edit (4/18):
+any prompt length, generate up to 512, gpt2-medium
+single input, varying kv length len: (128*26.8) + (128*40) + (256*63) = 24,678ms = 48ms/token
+single input, 512 kv length: 512*63 = 32,256ms = 63ms/token
+
+any prompt length, generate up to 256, gpt2-medium
+single input, varying kv length len: (128*26.8) + (128*40) = 8,550.4
+single input, 512 kv length: 256*63 = 16,128ms
+ideal state: 512, then single input, varying kv length
+
+40 token prompt, generate up to 512, gpt2-medium
+512 input, 512 kv length: (512-40+1) * 103ms = 48,719ms
+512 then single input, 512 length: (1*103) + ((512-40+1)*63) = 29,902ms
+ideal state: 512, then single input, varying kv length = 103 + ((128-40)*26.8) + (128*40) + (256*63) = 23,709ms
+
+450 token prompt, generate up to 512, gpt2-medium:
+512 input, 512 kv length: (512-450+1) * 103ms = 6,489 ms
+512 then single inputs, 512 kv length: (1*103) + ((512-450+1)*63) = 4,072
+ideal state: 512, then single input, varying kv length = 103 + ((512-450)*63) = 4,009ms
+
+40 token prompt, generate up to 128, gpt2-medium:
+512 input, 512 kv length: (128-40+1)*103 = 9,167ms
+512 then single input, 512 kv length: (1*103) + (128-40)*62.9 = 5,638ms
+ideal state: 512, then single input, varying kv length = 103 + ((128-40)*26.8) = 2,461.4ms
+
+40 token prompt, generate up to 256, gpt2-medium:
+512 input, 512 kv length: (256-40+1)*103 = 22,351ms
+512 then single input, 512 kv length: (1*103) + (256-40)*62.9 = 13,689.4ms
+ideal state: 512, then single input, varying kv length = 103 + ((128-40)*26.8) +(128*40) = 7,581.4ms
+
+End Edit (4/18)
+
 It seems to be an improvement over CoreML CPU but maybe not over a hand-tuned CPU implementation? Seems plausible -- there are 4bit quantized 7B param models that are 60ms/token.
 
 Unrelated, was trying to narrow down where the PSNR falls off with pythia-410m. Thought it might be specific ops and was trying to find them experimentally:
@@ -343,3 +375,67 @@ Sets of ops as f16:
 'band_part', 'softmax', 'gelu', 'gather', 'const' - 52
 'concat', 'band_part', 'gelu', 'const', 'gather' - 43
 'slice_by_index', 'reshape', 'band_part', 'transpose', 'const', 'concat', 'gather', 'gelu' - 31
+
+
+### April 19, 2023
+Thinking about KV-caching again. A few options:
+1. Branching model
+Pros: Simpler, inputs / outputs are the same, fastest
+Cons: Need to implement some weight sharing utility to avoid double storage(https://github.com/apple/coremltools/issues/1832), would need some creative solution to handle splitting large models into pipelines (probably a sequence of branching models would work).
+Unknowns: Will it run on ANE since if/else is CPU-only?
+2. Fixed KV cache size (e.g. max context length) and enumerated token inputs.
+Pros: Simplest, should be supported, decent but not best speed (see math under table from 4/17, assuming that's right)
+Cons: Not the fastest
+Unknowns: Possible without branching?
+3. Combined input
+Pros: Fastest, if it works
+Cons: Pipelining will be hard (have to recreate the combined input at each split), most complex, leaks out to the caler. Risk that it's not supported in the future.
+Unknowns: Is splitting/catting tensors slow? Will it run on ANE?
+
+Think that makes #2 the most appealing, since it would actually scale to xl and larger. Should open an issue about linked enumerated shapes (then #2 would be fastest + simplest). Any approach is better than what I'm doing now though.
+
+Took a detour back to ANE-optimized model to see if anything stood out as weird. Doing some comparisons with the ANE-converted whisper models. Structurally, in Netron, they look like theyr'e doing the same transformations.
+
+So.. the non-ANE whisper decoder model is slightly faster than the ANE-optimized one (12 vs 13.5ms). Not as dramatic as what I'm seeing with gpt2 but this decoder also has a sequence length of 1 -- could see that being impactful. ANE-encoder is 123ms, in line with what I see online. The non-ANE one does take an eternity to profile in Xcode...It comes in at 174ms (999869.21ms to load!!)
+
+Reading a bit more, maybe the benefit of ANE is memory not speed? Seems silly to take such an extreme speed hit for memory/compilation time (especially since that is cached after the first run). Even in the ml-ane-transformers screenshot the compilation + load are slower. Still good be memory/power consumption -- I have a lot of memory so maybe I just don't see it?
+
+Two things to look at: are there things in gpt2 but not the reference transformer (pos embeds, lm_head), what does performance look like for a single token?
+
+### April 20, 2023
+Whisper encoder is 176MB vs decoder 386MB. Maybe that's the delta? Too many weights to move around, not how fast the NE can go. Still seems weird that that would impact ANE-optimized more than non-optimized. gpt2 starts at 250MB.
+
+Found an 18M param GPT2 on HF (smaller vocab too, about half).
+ANE-optimized: 157ms prediction, 153ms load, 64ms compile
+non-optimized: 8ms prediction, 63ms load, 38ms compile
+
+Weird, noticed that the ANE mlpackages are noticeably larger. It's all the weight.bin. uh oh. The ANE-optimized has 15 extra weights (in the 18M param GPT). Trying to figure out why..
+
+It's the LM head in the ANE transformer. It's 13MB of weights just for that. Seems like the non-ANE version is smart enough to reuse the weight? Ah, it's because I explicitly squeeze the weights so they're different. I now see that the whisper implementation uses an einsum. I wonder... Just wholesale removed the lm_head to see what happens. Wow 7ms... so just need to add that back in in a reasonable way. :facepalm: Adding that back in, I don't fully understand it but it comes out at 14ms. So still actually slower but I need to think more about the shape.
+
+gpt2-medium is basically the same speed as non-optimized. Really need to check that the accuracy is correct before proceeding. Also splitting the model in 29 pieces at the end seems not-ideal.
+[] Make sure the model is accurate.
+[] Stop duplicating the embedding weights.
+[x] Look at moving qk mask inside the model.
+[x] Output mask before lm_head (seems faster).
+~[] Try splitting at the beginning too (share the splits?)~ doesn't make sense
+[x] Split the model less at the end. (doesn't seem to matter latency-wise)
+[] Understand the mapping/packing of axes for ANE.
+[x] Consider making qk a property instead of computed at run-time, see if that lets it get folded into a surrounding op. (it does not, but it does avoid some CPU computation at the start)
+[x] figure out why the matmul einsum is not exactly equal to the conv2d (seems like there's some slight differences)
+
+## April 23, 2023
+I now remember that part of the benefit of switchin to the non-ANE version was the PSNR improved (pretty sure). So yes it's fast (seems like it should be faster but still) but it's not accurate.
+
+So we've come full circle to when I started taking notes.
+
+## April 24, 2023
+Have been futzing around trying to squeeze precision out of float16. Tried Kahan summation as well as the KBN variant. Tried to take advantage of the fact that mean should reduce the magnitude which I think gives us a bit more precision, but no matter what I try it's always slightly less precise than the default ANE layer norm.
+
+Was poking around coremltools and noticed that there's a MeanVarianceNormalizeLayerParams in the proto. Seems like it could actually be used to implement the ANE layer norm. I know the non-ANE gpt2 has a "layer_norm" op in the MIL. I don't quite see the connection but I think that compiles down to this MVN layer. Going to see if there's anything fancy we get by leveraging that layer. Initial tests make it seem identical to the ANE layer norm but it's a thread to pull. Actually looks like that NN thing is for NeuralNetworks not mlprogram (duh) -- but seems like even without reshaping, using mb.layer_norm works. So just how to use it with torch ...
+
+Hacked it by putting a batch norm op in it's place and then replacing that with layer norm. The PSNR is nonsense (can try to measure that better tomorrow, makes sense batch norm != layer norm), but anecdotally the quality of the generations looks promising. But... it seems like the Neural Engine doesn't support this -- the generated text is absolute nonsense. Very fast of course.
+
+Tried flipping the bias (a la the actual ANE LayerNorm). Good try but didn't help. Will have to file a bug/radar.
+
+Should also try permuting the tensor.. maybe it's not so bad? 1024 x 512 isn't so big heh. Tried it... basically wrap the layer_norm with 2 transposes. Might have subtly messed something up, the quality is iffy but much better than gibberish. And it does run fast on the NE. This might be a good compromise? 80ms for gpt2-medium (75ms is the lowest I've seen it go ignoring accuracy) but it generates readable text. Should do a more empirical comparison/psnr but 20% improvement over the non-optimized gpt2 is pretty good.

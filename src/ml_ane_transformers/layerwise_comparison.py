@@ -1,8 +1,9 @@
-from vanilla_gpt2 import GPT as Vanilla
-from ane_gpt2 import GPT as ANE
+from src.ml_ane_transformers.vanilla_gpt2 import GPT as Vanilla
+from src.ml_ane_transformers.ane_gpt2 import GPT as ANE
 import torch
 import numpy as np
-from psnr import compute_psnr
+from src.utils.psnr import compute_psnr
+import os
 
 """
 What is this file?
@@ -116,11 +117,12 @@ with torch.no_grad():
 # E2E - with k_mask to make sure that works.
 
 ane_inputs = ane.build_inputs(idx, pad_to_length=40, pad_token_id=350)
-ane_idx = ane_inputs["input_ids"]
+ane_idx = ane_inputs["input_ids"].to("mps")
 qk_mask, k_mask, output_mask = [ane_inputs[k] for k in ["qk_mask", "k_mask", "output_mask"]]
 
+os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 with torch.no_grad():
-    ane_out = ane(ane_idx, qk_mask=qk_mask, output_mask=output_mask, k_mask=None)[:, [-1], :]
+    ane_out = ane.to("mps", torch.half)(ane_idx, output_mask=output_mask.to(ane_idx.device), qk_mask=None, k_mask=None)[:, [-1], :].float().cpu()
     van_out = van(idx)[0]
 
 assert ane_out.shape == van_out.shape, f"{ane_out.shape} != {van_out.shape}"

@@ -49,6 +49,7 @@ This project really just stitches together previously open-sourced tools. Thanks
 - [ane-ml-transformers](https://github.com/apple/ml-ane-transformers) - to make CoreML models go fast
 - [nanoGPT](https://github.com/karpathy/nanoGPT) - for a hackable GPT2 implementation
 - [huggingface](https://huggingface.co) - for weights + tokenizers
+- [ANE-Optimized-Whisper-OpenAI](https://github.com/RobertRiachi/ANE-Optimized-Whisper-OpenAI) - for splitting the embedding layer
 - [whisper_ane](https://github.com/Synopsis/whisper_ane) - for another ane example
 - [Netron](https://netron.app) - for clutch visualization
 - [ChatGPT](http://chat.openai.com) - for bouncing ideas

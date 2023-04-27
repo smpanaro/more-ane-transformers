@@ -15,7 +15,7 @@ class AttentionImplementations(Enum):
     EINSUM = "EINSUM"
     SPLIT_EINSUM = "SPLIT_EINSUM"
 
-ATTENTION_IMPLEMENTATION_IN_EFFECT = AttentionImplementations.EINSUM
+ATTENTION_IMPLEMENTATION_IN_EFFECT = AttentionImplementations.SPLIT_EINSUM
 
 class MultiHeadAttention(nn.Module):
     """ Multi-Head Attention optimized for efficient ANE deployment
@@ -96,6 +96,10 @@ class MultiHeadAttention(nn.Module):
     def _qk_softmax(self, q, k, v, qk_mask=None, k_mask=None):
         # Principle 2: Chunking Large Intermediate Tensors  (machinelearning.apple.com/research/apple-neural-engine)
         # Split q, k and v to compute a list of single-head attention functions
+
+        # Do the scalar multiply before the matmul so it can be folded into the conv.
+        q = q * self.q_normalize_fact
+
         mh_q = q.split(
             self.d_qk // self.n_head,
             dim=1)  # n_head * (batch_size, d_qk/n_head, 1, tgt_seq_len)
@@ -110,7 +114,7 @@ class MultiHeadAttention(nn.Module):
 
         # `qk = q @ k`
         attn_weights = [
-            torch.einsum('bchq,bkhc->bkhq', [qi, ki]) * self.q_normalize_fact
+            torch.einsum('bchq,bkhc->bkhq', [qi, ki])
             for qi, ki in zip(mh_q, mh_k)
         ]  # n_head * (batch_size, src_seq_len, 1, tgt_seq_len)
 
@@ -181,6 +185,9 @@ class MultiHeadAttention(nn.Module):
             attn = torch.einsum("bhqk,bhck->bhcq", [attn_weights, mh_v])
             attn = attn.contiguous().view(bs, self.d_out, 1, -1)
         elif ATTENTION_IMPLEMENTATION_IN_EFFECT == AttentionImplementations.SPLIT_EINSUM:
+            # Do the scalar multiply before the matmul so it can be folded into the conv.
+            q = q * self.q_normalize_fact
+
             # Principle 2: Chunking Large Intermediate Tensors  (machinelearning.apple.com/research/apple-neural-engine)
             # Split q, k and v to compute a list of single-head attention functions
             mh_q = q.split(
@@ -197,7 +204,7 @@ class MultiHeadAttention(nn.Module):
 
             # `qk = q @ k`
             attn_weights = [
-                torch.einsum('bchq,bkhc->bkhq', [qi, ki]) * self.q_normalize_fact
+                torch.einsum('bchq,bkhc->bkhq', [qi, ki])
                 for qi, ki in zip(mh_q, mh_k)
             ]  # n_head * (batch_size, src_seq_len, 1, tgt_seq_len)
 

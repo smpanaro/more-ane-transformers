@@ -41,7 +41,45 @@ from torch.nn import functional as F
 from .ane.multihead_attention import SelfAttention as AneSelfAttention
 # from ane.multihead_attention import MultiHeadAttention as AneMultiHeadAttention
 from .ane.layer_norm import LayerNormANE as AneLayerNormx
+from .ane.dummy_layer_norm import DummyLayerNormANE
+from .ane.kahan_layer_norm import KahanLayerNormANE
 from .ane.ffn import FFN as AneMLP
+
+# Torch does not support layer norm over the 1st dimension. But the MIL (almost) does.
+# Override this to use the native 1st dimension MIL layer norm.
+OVERRIDE_LAYER_NORM = True
+layer_norm_cls = DummyLayerNormANE if OVERRIDE_LAYER_NORM else AneLayerNormx
+
+from coremltools.converters.mil import register_torch_op
+from coremltools.converters.mil.mil import Builder as mb
+from coremltools.converters.mil.frontend.torch.ops import _get_inputs
+from coremltools.converters.mil.frontend.torch.torch_op_registry import _TORCH_OPS_REGISTRY
+
+if OVERRIDE_LAYER_NORM:
+    if "batch_norm" in _TORCH_OPS_REGISTRY:
+        del _TORCH_OPS_REGISTRY["batch_norm"]
+    @register_torch_op
+    def batch_norm(context, node):
+        inputs = _get_inputs(context, node, expected=9)
+        _input = inputs[0]
+        weight = inputs[1]
+        bias = inputs[2]
+        # running_mean = inputs[3]
+        # running_var = inputs[4]
+        # training = inputs[5].val
+        eps = inputs[7]
+
+        # Ideally would not need the transposes, but axes=[1] doesn't work
+        # on the Neural Engine. https://developer.apple.com/forums/thread/728931
+
+        # node.name has to go on the last op, that's also the one that gets added to the context
+        rs1 = mb.transpose(x=_input, perm=[0,3,2,1])
+
+        ln = mb.layer_norm(x=rs1, axes=[3], epsilon=eps, gamma=weight, beta=bias)
+        # context.add(ln)
+
+        rs2 = mb.transpose(x=ln, perm=[0,3,2,1], name=node.name)
+        context.add(rs2)
 
 # Note: torch.nn.LayerNorm and ane_transformers.reference.layer_norm.LayerNormANE
 # apply scale and bias terms in opposite orders. In order to accurately restore a
@@ -49,12 +87,13 @@ from .ane.ffn import FFN as AneMLP
 def correct_for_bias_scale_order_inversion(state_dict, prefix, local_metadata,
                                            strict, missing_keys,
                                            unexpected_keys, error_msgs):
-    print("tweakingxx")
-    state_dict[prefix +'bias'] = state_dict[prefix + 'bias'] / state_dict[prefix +'weight']
+    if not OVERRIDE_LAYER_NORM:
+        state_dict[prefix +'bias'] = state_dict[prefix + 'bias'] / state_dict[prefix +'weight']
     return state_dict
 
 
-class AneLayerNorm(AneLayerNormx):
+# class AneLayerNorm(AneLayerNormx):
+class AneLayerNorm(layer_norm_cls):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._register_load_state_dict_pre_hook(
@@ -200,6 +239,7 @@ class GPT(nn.Module):
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
         # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        # FIXME: This duplicates these (large) weights.
         self.transformer.wte.weight = nn.Parameter(self.lm_head.weight.squeeze()) # https://paperswithcode.com/method/weight-tying
 
         # init all weights
@@ -208,6 +248,8 @@ class GPT(nn.Module):
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        self.qk_mask = ((1 - torch.tril(torch.ones((512,512), dtype=torch.float32))).t() * -1e4).view(1, 512, 1, 512)
 
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
@@ -247,12 +289,15 @@ class GPT(nn.Module):
         # Batch=1, Sequence=NumTokens, Channels=NumEmbed aka Hidden Size
         return x.transpose(1, 2).unsqueeze(2)
 
-    def forward(self, idx, qk_mask=None, output_mask=None, k_mask=None, targets=None):
+    def forward(self, idx, output_mask=None, qk_mask=None, k_mask=None, targets=None):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0) # shape (1, t)
 
+        if qk_mask is None:
+            # qk_mask = ((1 - torch.tril(torch.ones((512,512), dtype=torch.float32))).t() * -1e4).view(1, 512, 1, 512)
+            qk_mask = self.qk_mask[:, :t, :, :t].to(device)
 
         # print("forwardz", idx.shape, self.transformer.wte.weight.shape)
         # forward the GPT model itself
@@ -269,27 +314,28 @@ class GPT(nn.Module):
             x = block(x, qk_mask=qk_mask, k_mask=k_mask)
         x = self.transformer.ln_f(x)
 
-        # print("x post-blocks", x.shape)
-        # Permute to SC11 to match expected LM head shape.
-        # TODO: Wish there were a better way to explain this but afaict it's
-        # equivalent to the previous lm_head Linear layer.
-        x = x.permute(3, 1, 0, 2)
-        # print("x pre-lm", x.shape, "lm_head.weights", self.lm_head.weight.shape)
-
-        if targets is not None:
-            # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
-        else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            # logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
-            logits = self.lm_head(x).squeeze().unsqueeze(0)
-            # No need to pass back the other length-1 results we don't care about.
-            if output_mask is not None:
-                logits = torch.index_select(logits, 1, output_mask)
-            # logits = logits.permute(2, 0, 1)
+        # No need to pass back the other length-1 results we don't care about.
+        # Big speed boost.
+        if output_mask is not None:
+            x = torch.index_select(x, 3, output_mask)
             # TODO: Sprinkle in a softmax here? Or does that prevent us from doing top-p/top-k
             loss = None
+
+        # logits = x
+        old = False
+        if old:
+            # Old slow way.
+            x = x.permute(3, 1, 0, 2) # (S, C, B, 1)
+            logits = self.lm_head(x).squeeze().unsqueeze(0).unsqueeze(0)
+        else:
+            # # New fast way.
+            # This part is actually quite fast. 4ms out of 75ms.
+            x = x.permute(0,2,3,1).squeeze(0)
+
+            # ANE can only load tensors with dim size of at most 16,384 - divide the vocab size to be less than that
+            # gpt2 vocab size is a product of two primes smh
+            splits = self.transformer.wte.weight.split(self.transformer.wte.weight.shape[0]//29, dim=0)
+            logits = torch.cat([torch.einsum('bid,jd->bij', x, split) for split in splits], dim=-1)#.view(*x.shape[:2], -1)
 
         return logits
 
@@ -333,6 +379,11 @@ class GPT(nn.Module):
         sd = model.state_dict()
         sd_keys = sd.keys()
         sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # discard this mask / buffer, not a param
+
+        if OVERRIDE_LAYER_NORM:
+            sd_keys = [k for k in sd_keys if not k.endswith("running_mean")]
+            sd_keys = [k for k in sd_keys if not k.endswith("running_var")]
+            sd_keys = [k for k in sd_keys if not k.endswith("num_batches_tracked")]
 
         # init a huggingface/transformers model
         model_hf = GPT2LMHeadModel.from_pretrained(model_type)
@@ -591,13 +642,19 @@ def transform_hf_weights(state_dict):
         # Note: torch.nn.LayerNorm and ane_transformers.reference.layer_norm.LayerNormANE
         # apply scale and bias terms in opposite orders. In order to accurately restore a
         # state_dict trained using the former into the the latter, we adjust the bias term
-        elif ".ln_" in k and ".bias" in k:
+        elif ".ln_" in k and ".bias" in k and not OVERRIDE_LAYER_NORM:
             # print(k, state_dict[k].shape)
             # before = state_dict[k].shape
             weight_key = k.replace(".bias", ".weight")
             state_dict[k] = state_dict[k] / state_dict[weight_key]
             # after = state_dict[k].shape
             # print(before, "->", after)
+
+        elif ".ln_" in k and OVERRIDE_LAYER_NORM:
+            newk = k.replace(".weight", ".bn.weight")
+            newk = newk.replace(".bias", ".bn.bias")
+            state_dict[newk] = state_dict.pop(k)
+
 
         # else:
         #     if "bias" in k:

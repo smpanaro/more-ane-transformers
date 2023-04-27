@@ -4,6 +4,9 @@ import torch
 def compute_psnr(a, b):
     """
     Compute Peak-Signal-to-Noise-Ratio across two numpy.ndarray objects
+    a: the approximation
+    b: the ground truth
+
     From ml-ane-transformers.
 
     Original License:
