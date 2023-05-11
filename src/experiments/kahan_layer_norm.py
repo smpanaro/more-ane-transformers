@@ -12,6 +12,8 @@ import sys
 Compare and test a Kahan summation implementation of layer norm vs.
 the default ANE-optimized one.
 
+Seems that for some reason my Kahan implementation is slightly less accurate.
+
 Ended up finding that the model builder layer_norm can take a 4D input and do
 the norm on the channel dimension. Unfortunately doesn't work on the Neural Engine afaict.
 """

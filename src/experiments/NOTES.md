@@ -376,6 +376,7 @@ Sets of ops as f16:
 'concat', 'band_part', 'gelu', 'const', 'gather' - 43
 'slice_by_index', 'reshape', 'band_part', 'transpose', 'const', 'concat', 'gather', 'gelu' - 31
 
+EDIT(May 7, 2023 - some of the "wat" can be explained by f32->f16 cast before those ops losing precision)
 
 ### April 19, 2023
 Thinking about KV-caching again. A few options:
@@ -439,3 +440,31 @@ Hacked it by putting a batch norm op in it's place and then replacing that with 
 Tried flipping the bias (a la the actual ANE LayerNorm). Good try but didn't help. Will have to file a bug/radar.
 
 Should also try permuting the tensor.. maybe it's not so bad? 1024 x 512 isn't so big heh. Tried it... basically wrap the layer_norm with 2 transposes. Might have subtly messed something up, the quality is iffy but much better than gibberish. And it does run fast on the NE. This might be a good compromise? 80ms for gpt2-medium (75ms is the lowest I've seen it go ignoring accuracy) but it generates readable text. Should do a more empirical comparison/psnr but 20% improvement over the non-optimized gpt2 is pretty good.
+
+## April 28, 2023
+Two small experiments. Tried removing the nn.Embedding layer to see how slow that + the CPU->NE transition was. It was ~0.
+Also tried increasing the number of splits in the mh_* attention arrays by 4x. Twice as slow for gpt2-medium (and I'm not sure if it even makes sense).
+
+## May 7, 2023
+Looked for low hanging speedups in coremltools. Upgrading the underlying protobuf version (which has performance speedups) didn't help. Seems like most of the time is spent in 2 optimization passes (casts and something else). Nothing obvious to me.
+
+Switched tracks to look at pythia again. My recollection was that PSNR cratered for some of the models, but not all. Decided to look at some histograms of the weights. Sort of interesting. Smaller models have more extreme weights (-65/65 for 70m) but larger models (1b-2.8b) stay within the range of -10/10. Most weights are within (-2,2) for those larger models.
+
+Revisiting experiments from 4/17 trying to find a culprit op. Realized that reshape being f16 should be no problem, so it must be that it loses precision for some op that comes after it (there are many...). With that lens, it seems like maybe matmul is the problem? Maybe the q@kT? Since f16 softmax was ok so probably not the @v.
+
+Experimentally seems like that is the caes - q@kT in f16 exhibits the problem, but the @v does not. There are no other matmuls.
+
+## May 8, 2023
+Seems like the max value in the query grows as layers progress. Maybe it (silently?) overflows? Trying clamping it -- keeps the PSNR vs. HF high enough (>60) but doesn't help the CoreML model.
+
+Trying a more targeted f32 test of just: k@qT matmul, the reshape and mask add after, softmax. Sort of helped - PSNR of 46 (vs 37). Lines up with the clamping of Q+K before matmul not really helping.
+
+Maybe time to put a lid on it?
+
+## May 9, 2023
+Maybe >30 PSNR is ok? Would be interesting to compare the order of the logits -- maybe that is a better evaluation? Or maybe just the top N?
+
+### May 10, 2023
+Tried a few other measures of similarity (KL Div, Jaccard of the top k) and they all agree with PSNR. Jaccard is a little easier for me to intuit -- 90PSNR is 1 jaccard, 60PSNR is ~.95 jaccard, 35PSNR is ~0.84, 20PSNR is ~0.40. Think that's good enough to be usable (anecdotally it is, but this gives me a bit more confidence). Still feels odd to me that f16 would contribute so much error -- once the torch mps f16 issues are fixed would be interesting to compare and rule out CoreML oddity.
+
+Turns out that is fixed in the nightly torch release. PSNR is 42 which is a smidge higher than CoreML. Possible I missed some float32 somewhere. The torch amp docs have a section for CUDA ops that are numerically unstable in float16, might be an interesting cross-reference.

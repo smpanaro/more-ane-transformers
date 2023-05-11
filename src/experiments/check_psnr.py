@@ -24,7 +24,12 @@ args = parser.parse_args()
 model_class = GPT2 if "gpt2" in args.model_name else Pythia
 baseline_model = model_class.from_pretrained(args.model_name)
 
-mlmodel = MLModelProxy(args.mlmodelc_path, ct.ComputeUnit.CPU_AND_NE)
+mlmodel = MLModelProxy(args.mlmodelc_path, ct.ComputeUnit.CPU_ONLY)
+
+def jaccard(x,y):
+    z=set(x).intersection(set(y))
+    a=float(len(z))/(len(x)+len(y)-len(z))
+    return a
 
 psnrs = []
 for i in range(5):
@@ -46,5 +51,22 @@ for i in range(5):
     print("PSNR:", psnr)
     psnrs.append(psnr)
 
-print("Mean:", np.average(psnrs))
-print("Median:", np.median(psnrs))
+    for k in [80]: #range(40, 400, 40):
+        print("k:", k)
+        baseline_topk = torch.topk(torch.nn.functional.softmax(baseline_out, dim=-1), k)
+        coreml_topk = torch.topk(torch.nn.functional.softmax(mlmodel_out, dim=-1), k)
+        # print("baseline_topk:", baseline_topk.indices)
+        # print("coreml_topk:", coreml_topk.indices)
+
+        topk_psnr = compute_psnr(baseline_out[:, :, baseline_topk.indices], mlmodel_out[:, :, baseline_topk.indices])
+        print("topk PSNR:", topk_psnr)
+        # closer to 1 is better
+        print("jaccard topk", jaccard(baseline_topk.indices.flatten().tolist(), coreml_topk.indices.flatten().tolist()))
+
+        kl_div = torch.nn.functional.kl_div(torch.nn.functional.log_softmax(mlmodel_out, dim=-1), torch.nn.functional.softmax(baseline_out, dim=-1), reduction="batchmean")
+        # clsoer to 0 is better
+        print("kl div", kl_div.item())
+    print("")
+
+print("Mean PSNR:", np.average(psnrs))
+print("Median PSNR:", np.median(psnrs))

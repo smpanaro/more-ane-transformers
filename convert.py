@@ -55,7 +55,7 @@ def op_selector(op):
     (usually the names contain a variable name).
     """
     # LayerNorm is where we lose most of our precision. From experiments
-    # in omptimizing for ANE, it's most likely the computing the first mean,
+    # in optimizing for ANE, it's most likely the computing the first mean,
     # but using the non-optimized version we have to float32 the whole layer norm.
     return op.op_type not in ["layer_norm"]
 

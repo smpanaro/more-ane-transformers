@@ -416,7 +416,7 @@ if __name__ == "__main__":
     from transformers import GPTNeoXForCausalLM, AutoTokenizer
     from src.utils.psnr import compute_psnr
     parser = argparse.ArgumentParser(description='Convert a model to CoreML.')
-    parser.add_argument('--model_name', choices=GPT.model_names(), default="pythia-70m", type=str)
+    parser.add_argument('--model_name', choices=GPT.model_names(), default="pythia-160m", type=str)
     args = parser.parse_args()
 
     model_name = 'EleutherAI/' + args.model_name
