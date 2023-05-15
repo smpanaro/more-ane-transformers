@@ -24,7 +24,8 @@ args = parser.parse_args()
 model_class = GPT2 if "gpt2" in args.model_name else Pythia
 baseline_model = model_class.from_pretrained(args.model_name)
 
-mlmodel = MLModelProxy(args.mlmodelc_path, ct.ComputeUnit.CPU_ONLY)
+# Not all models work on CPU_ONLY (e.g. pythia-70m)
+mlmodel = MLModelProxy(args.mlmodelc_path, ct.ComputeUnit.CPU_AND_NE)
 
 def jaccard(x,y):
     z=set(x).intersection(set(y))

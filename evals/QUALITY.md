@@ -18,7 +18,8 @@ The conversion from the original model weights to CoreML is lossy. One way to me
 |-   |-   |-   |-   |-   |-   |-   |
 |56.5|59.7|34.2|63.6|45  |43.4|41.2|
 
-_values <<60 all have more than 16 layers, still seem usable (see below)_
+<sub>values &lt;&lt;60 all have more than 16 layers, still seem usable (see below)</sub>
+<sub>70M+160M are unstable on CPU only, CPU+NE is required</sub>
 
 </details>
 
