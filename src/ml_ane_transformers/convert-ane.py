@@ -13,6 +13,7 @@ Convert a ANE-optimized nanoGPT to CoreML.
 file_suffix = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
 
 model_name = "gpt2"
+# model_name = "ckiplab/gpt2-tiny-chinese"
 model_filename = model_name.split("/")[-1] + "_" + file_suffix
 
 retrace = True

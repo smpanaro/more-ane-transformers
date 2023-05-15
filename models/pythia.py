@@ -455,6 +455,9 @@ if __name__ == "__main__":
         inputs = {k:v for k,v in inputs.items() if k in ["input_ids"]}
         hf_out = hf(**inputs)['logits']
         nano_out = nano(**inputs)
+        # nano = nano.to(device="mps",dtype=torch.float16)
+        # inputs = {k: v.to(device="mps") for k, v in inputs.items()}
+        # nano_out = nano(**inputs).cpu().float()
 
     assert hf_out.shape == nano_out.shape, f"{hf_out.shape} != {nano_out.shape}"
     # psnr should be ~240 if perfect.

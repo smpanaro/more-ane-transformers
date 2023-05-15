@@ -336,6 +336,7 @@ class GPT(nn.Module):
 
     @staticmethod
     def config_args():
+        # ckiplab/gpt2-tiny-chinese is a good tiny model for experimenting, vocab size 21128
         return OrderedDict({
             'gpt2':         dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
             'gpt2-medium':  dict(n_layer=24, n_head=16, n_embd=1024), # 350M params
