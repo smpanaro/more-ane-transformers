@@ -16,7 +16,8 @@ NOTE: These times are intended to give a rough relative measure of performance a
 |-|-|-|-|-|
 |2021 MBP M1|69ms*      |103ms             |210ms            |455ms           |
 |2022 Air M2|-          |-                 |-                |406ms           |
-* partially runs on CPU
+
+\* partially runs on CPU
 
 ## pythia
 
@@ -24,5 +25,6 @@ NOTE: These times are intended to give a rough relative measure of performance a
 |-|-|-|-|-|-|-|-|
 |2021 MBP M1|16ms*|39ms|112ms|304ms|465ms |×     |×   |
 |2022 Air M2|-    |-   |-    |-    |-     |1050ms|×†  |
-* partially runs on CPU
+
+\* partially runs on CPU
 † may still be possible
