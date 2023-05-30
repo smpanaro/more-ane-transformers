@@ -468,3 +468,8 @@ Maybe >30 PSNR is ok? Would be interesting to compare the order of the logits --
 Tried a few other measures of similarity (KL Div, Jaccard of the top k) and they all agree with PSNR. Jaccard is a little easier for me to intuit -- 90PSNR is 1 jaccard, 60PSNR is ~.95 jaccard, 35PSNR is ~0.84, 20PSNR is ~0.40. Think that's good enough to be usable (anecdotally it is, but this gives me a bit more confidence). Still feels odd to me that f16 would contribute so much error -- once the torch mps f16 issues are fixed would be interesting to compare and rule out CoreML oddity.
 
 Turns out that is fixed in the nightly torch release. PSNR is 42 which is a smidge higher than CoreML. Possible I missed some float32 somewhere. The torch amp docs have a section for CUDA ops that are numerically unstable in float16, might be an interesting cross-reference.
+
+### May 29, 2023
+TIL zip has a max size of 4GB and macOS doesn't support zip64. New commands to compress + decompress large files:
+compress: `tar -czvf - model.mlpackage | split -b 1800m -d -a 1 - model.mlpackage.tar.gz.`
+decompress: `cat directory.tar.gz.* | tar -xzvf -`
