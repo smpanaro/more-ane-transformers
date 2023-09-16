@@ -47,7 +47,8 @@ from .ane.ffn import FFN as AneMLP
 
 # Torch does not support layer norm over the 1st dimension. But the MIL (almost) does.
 # Override this to use the native 1st dimension MIL layer norm.
-OVERRIDE_LAYER_NORM = True
+# See: https://github.com/apple/coremltools/pull/1972 to avoid this.
+OVERRIDE_LAYER_NORM = False
 layer_norm_cls = DummyLayerNormANE if OVERRIDE_LAYER_NORM else AneLayerNormx
 
 from coremltools.converters.mil import register_torch_op
@@ -71,6 +72,7 @@ if OVERRIDE_LAYER_NORM:
 
         # Ideally would not need the transposes, but axes=[1] doesn't work
         # on the Neural Engine. https://developer.apple.com/forums/thread/728931
+        # Edit: Actually axes=[1] works, but it overflows sooner than axes=[3] on Venutura.
 
         # node.name has to go on the last op, that's also the one that gets added to the context
         rs1 = mb.transpose(x=_input, perm=[0,3,2,1])
@@ -108,7 +110,7 @@ def new_gelu(x):
     return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
 
 class LayerNorm(nn.Module):
-    """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
+    """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False"""
 
     def __init__(self, ndim, bias):
         super().__init__()

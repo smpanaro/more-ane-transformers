@@ -53,6 +53,8 @@ def op_selector(op):
     # LayerNorm is where we lose most of our precision. Interestingly, it seems
     # the first mean contributes almost all the error.
     # TODO: This may only be a problem for "gpt", never tried the larger variants.
+    # Edit: Much later, it's very reasonable that the mean loses precision in fp16.
+    # This should be better in Sonoma.
     return op.op_type not in ["reduce_mean"] or "channels_mean" not in op.name
 
 compute_precision=ct.precision.FLOAT16

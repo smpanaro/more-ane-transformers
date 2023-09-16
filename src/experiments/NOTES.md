@@ -295,14 +295,16 @@ Wow, using the model with the if-statement and CPU-only inference crawls. Oh and
 
 All times are for a single input token, inferred min(196, seqlen) times and median time per inference. Not using the branched model.
 
-|model      |seq length|CPU   |CPU+NE|NE - No Cache|
-|--|--|--|--|--|
+CPU - No Cache -- added 9/9/23, measured once using Xcode.
+
+|model      |seq length|CPU   |CPU+NE|NE - No Cache|CPU - No Cache|
+|--|--|--|--|--|--|
 |gpt        |1024      |79.6ms|40.3ms|             |
 |gpt        |512       |43.2ms|23.7ms|69ms         |
 |gpt        |256       |25.7ms|15.5ms|             |
 |gpt        |128       |16.6ms|11.7ms|             |
 |gpt2-medium|1024      |219ms |112ms|              |
-|gpt2-medium|512       |116ms |62.9ms|103ms        |
+|gpt2-medium|512       |116ms |62.9ms|103ms        |1.35s
 |gpt2-medium|256       |67.9ms|40.1ms|             |
 |gpt2-medium|128       |45.7ms|26.8ms|             |
 |gpt2-medium|16        |26.2ms|20.4ms|             |
@@ -473,3 +475,103 @@ Turns out that is fixed in the nightly torch release. PSNR is 42 which is a smid
 TIL zip has a max size of 4GB and macOS doesn't support zip64. New commands to compress + decompress large files:
 compress: `tar -czvf - model.mlpackage | split -b 1800m -d -a 1 - model.mlpackage.tar.gz.`
 decompress: `cat directory.tar.gz.* | tar -xzvf -`
+
+### August 31, 2023
+Heard back from Apple about my Radar for (B,C,1,S) layer norm. Turns out my repro case was overflowing float16. In retrospect, obvious. Though I'm confused about why I even filed it in the first place. What was I seeing?
+
+Maybe I broken something when futzing with kv caching. 7d95b07 has convert-ane PSNR at 34 vs. 50 from earlier commits and <1 at 3470a25.
+
+Maybe the right way to do this (instead of magicking away the batch_norm) is to update coremltools with a pass that fuses the pattern into a layer_norm op. TestFuseLayerNormOrInstanceNorm is close, can probably just modify it. Won't help with overflows of course.
+
+## September 3, 2023
+Modified coremltools 7.0b2 so it will replace the ml-ane-transformers layer norm with a proper layer_norm MIL op. Initial tests show that the performance is exactly the same. It definitely makes things easier to read in Netron, but that is not a super compelling reason. Maybe I'm missing something?
+
+I also suspect that my current ANE-optimized GPT is somehow buggy (or maybe I just need to update the generate.py script). Edit: Still might be buggy, but it's at least consistent going back the last few commits.
+
+Had a weird idea, I wonder if the MIL layer_norm axes=[-1] (wrapped with transposes) will yield the same results as layer_norm axes=[1] (no transposes). -- It seems like axes=[3] is more resilient to overflowing than axes[1] (weird, but I think it's true).
+
+Might try doing the transpose wrapping based on an ENV var or something in coremltools.
+
+## September 4, 2023
+Remembered that iOS17 was touting using transformers. Curious to see if there's anything to learn from them.
+
+Can see the kbd process loading:
+loading resource id 0 type 46 with path /Library/Developer/CoreSimulator/Volumes/iOS_21A5326a/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 17.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/LinguisticData/RequiredAssets_en.bundle/AssetData/en.lm/unilm.bundle/unilm_joint_cpu.espresso
+
+Is this the same as http://codinfox.github.io/espresso/ ? https://orth.uk/apple-vision-framework/ seems to think so.
+
+
+## September 8, 2023
+
+Very rough notes from past few days of looking at models in Netron.
+
+For the speech to text model:
+
+Wp = workpiece, ph = phoneme? GPT’s guess but IDK
+Wp seems to be the first transformer block
+Wp cache is 12, 128,8,64 — num layers, seq Len, num heads, ??
+
+I think it’s a sliding window KV cache maybe? KV cache gets split by layer and head until it’s 1,64,1,128 but then concat’d with something that 1,64,1,4. (So 64 is channels, last dim is sequence most likely here)
+
+Next step after that is a slice by index, that pushes the last 4 elements out of the concerted value (so windowing so the length is 128)
+
+Then we get to the matmul (einsum) which is 1,64,1,4 x 1,128,1,64 — so that does take advantage of the KV cache.
+
+_does not answer how you get the KV cache in the first place_
+Is it all zeros initially? Maybe that works? Since you shift in the new stuff to K before multiplying by Qt?
+
+Eh.. I think you still are stuck. You have 1 degree of freedom so either you fix the size of K and vary input, or fix input and vary K (eh I’m not sure that makes sense)
+
+Ok.. here’s an idea. Initial inference on CPU (!) give us the benefits of doing the whole prompt in one shot — take the KV cache from that and do token-by-token generation on ANE. Input is fixed at 1 token, but we can vary the size of the KV cache (and time scales proportionally with that .. so we will benefit).
+
+This has the benefit of keeping the token → embedding bit in the model, versus my franken-input approach.
+
+— Crazy idea, what if we had an enumerated shape for KV cache, and a range shape (default 1) for the inputs.
+
+## September 9, 2023
+
+Tried the enumerated + range. Works on CPU but not NE. Re-visited a few of my old ideas (splitting/slicing tensors) to try and cheat around the restriction of one enumerated shape and have roughly the same rsults as before: some work on CPU, some don't work at all.
+
+Will have to try some on the new OS, but not today.
+
+Inputs: (1,256) or (256,256) or (1,512) or (512,512) ((tokens, kv cache size))
+Q dims: 1xC, 256xC, 1xC, 512xC
+QKT dims: 1x1, 256x256, 1x1, 512x512
+QKT+cache dims: 256x256, 256x256, 512x512, 512x512
+
+I wonder if I can hand-tune an MLPackage that combines 1 set of weights with several different nets.
+
+## September 10, 2023
+Had a passing thought. What if we fixed the input tokens at 128 (not 1, but not huge) and then only varied the KV cache size. That could work. You would always recompute the last 128 tokens, but that seems to be a scale of things that is decently fast and it lets you infer large prompts in 128 token chunks instead of crawling through it 1 token at a time.
+
+If you have < 128 tokens, you still compute them but KV mask them out.
+
+Alas, it seems like the concat then slice doesn't work on ANE with enumerated shapes. Maybe on the new OS? Maybe there's a way to get coremltools to do so (since we can know at MIL-building time that the dynamic symbols are the same).
+
+Maybe something like this: https://github.com/apple/coremltools/issues/764 (won't work exactly since I think you'll get a new symbol). Maybe torch.slice_scatter?
+
+## September 11, 2023
+Have a few too many balls in the air. Going to try to land some. First up is layer norm. Re-visited my test script (compare_layer_norm_axes) and confirmed that layer_norm(axes=[1]) yields the same results as ml-ane-transformers LayerNormANE. Will clean up my PR for that pass (doesn't seem to help performance but at least makes things easier to read).
+
+Also confirmed that axes=[1] overflows before axes=[3]. Will need to clean probably create a new repro script for that, but will file a radar. In the meantime, nice to know that you can trade a bit of speed (15% ish) for precision if needed.
+
+Next up (in no order):
+- Lite clean up of my netron fork and push it (no PR though). (done)
+- Look into sympy in coremltools and see if adding support for symbol +/- constant in slice/concat would be any different (hard to tell how that is used).
+- Profile fixed-size KV cache implementation (128 input tokens, 512 KV cache) and see if performance is worth it (vs say 512 inputs always). If so, implement and re-build models. (Not as nice as if we could do enumerated inputs, but a smal step in that direction.)
+
+## September 12, 2023
+Put up a PR for the LayerNormANE in coremltools. Started to put together a radar (repro_layer_norm_axes) but found that axes=[1] and axes=[3] overflow at about the same point on Sonoma, so seems like that was improved! Would be interesting to see if there is still a speed difference between them at some point but the precision is more than welcome.
+
+On a different note, the TinyStories peeps released a new 1.3B param model which might be interesting to implement (it's called phi-1.5).
+
+## September 16, 2023
+Cleaning up from the latest batch of experiments. Rought summary:
+
+|File|Input Tokens|KV Cache|ANE?|
+|--|--|--|--|
+|enumerated_and_flexible_inputs|flexible|enumerated|no|
+|enumerated_kv_cache|fixed|enumerated|no, but think it should|
+|enumerated_shape_split \*|merged with ->|enumerated|no|
+
+<sub>* enumerated_shapes_transformer, multi_variable_inputs are the same idea</sub>

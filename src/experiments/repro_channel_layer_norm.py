@@ -3,16 +3,21 @@ import torch.nn as nn
 import coremltools as ct
 from coremltools.converters.mil import Builder as mb
 import numpy as np
+import os
 
 """
 Reproduce layer norm on the first dimension of a 4D tensor that
 works on CPU but fails on Neural Engine.
+
+Update: Per my radar, Apple says CPU is f32 and ANE is f16 which overflows.
+Can validate that by changing x from arange (oof) to a uniform distribution
+(so that no individual channel has a large sum).
 """
 
 eps = 1e-5
 
-# B,C,S = 1,4,2 # This will look like it works because it's too small for the ANE.
-B,C,S = 1,1800,16 # This will fail since it's large enough for the ANE. Make it bigger if it doesn't.
+B,C,S = 1,4,2 # This will look like it works because it's too small for the ANE.
+# B,C,S = 1,1800,16 # This will fail since it's large enough for the ANE. Make it bigger if it doesn't.
 
 g,b = 1, 0 # It's not these, the results change predictably with them.
 @mb.program(input_specs=[mb.TensorSpec(shape=(B,C,1,S)),])
@@ -22,12 +27,31 @@ def ln_prog(x):
     x = mb.layer_norm(x=x, axes=[1], gamma=gamma, beta=beta, name="y")
     return x
 
-x = torch.arange(B*C*S).reshape(B,C,1,S).float()
+    ##channels_mean = inputs.mean(dim=1, keepdims=True)
+    # channels_mean = mb.reduce_mean(x=x, axes=[1], keep_dims=True)
+    ##zero_mean = inputs - channels_mean
+    # zero_mean = mb.sub(x=x, y=channels_mean)
+    ##zero_mean_sq = zero_mean * zero_mean
+    # zero_mean_sq = mb.mul(x=zero_mean, y=zero_mean)
+    ##denom = (zero_mean_sq.mean(dim=1, keepdims=True) + self.eps).rsqrt()
+    # zero_mean_sq_mean = mb.reduce_mean(x=zero_mean_sq, axes=[1], keep_dims=True)
+    ##zero_mean_sq_mean_plus_eps = mb.add(x=zero_mean_sq_mean, y=1e-5)
+    # denom = mb.rsqrt(x=zero_mean_sq_mean, epsilon=1e-5)
+    ##out = zero_mean * denom
+    # return mb.mul(x=zero_mean, y=denom, name="y")
+
+
+# x = torch.arange(B*C*S).reshape(B,C,1,S).float()
+x = torch.from_numpy(np.random.uniform(low=-10, high=10, size=(B, C, 1, S)))
 # x = torch.cat([torch.ones((1,1,1,S)).float()] + [torch.zeros((1,1,1,S)).float() for i in range(C-1)], dim=1)
 # x = torch.cat([torch.ones((1,C,1,1)).float() * C*2] + [torch.zeros((1,C,1,1)).float() for i in range(S-1)], dim=3)
 # print(x.squeeze(2).permute(0,2,1))
 # x = x[torch.randperm(x.shape[0])]
 # x = torch.randn((B,C,1,S)).float() + 1000
+
+
+print("PID:", os.getpid())
+input("prese enter to go")
 
 def make_model(prog, compute_units):
     return ct.convert(

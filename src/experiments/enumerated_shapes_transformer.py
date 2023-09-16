@@ -7,6 +7,8 @@ from dataclasses import dataclass
 """
 See if there's a way to achieve KV-caching in one model by using
 enumerated shapes cleverly.
+
+See multi_variable_inputs experiment for a cleaner version.
 """
 
 from coremltools.converters.mil.frontend.torch.torch_op_registry import _TORCH_OPS_REGISTRY, register_torch_op
