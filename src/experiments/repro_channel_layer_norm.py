@@ -16,8 +16,8 @@ Can validate that by changing x from arange (oof) to a uniform distribution
 
 eps = 1e-5
 
-B,C,S = 1,4,2 # This will look like it works because it's too small for the ANE.
-# B,C,S = 1,1800,16 # This will fail since it's large enough for the ANE. Make it bigger if it doesn't.
+# B,C,S = 1,4,2 # This will look like it works because it's too small for the ANE.
+B,C,S = 1,1800,16 # This will fail since it's large enough for the ANE. Make it bigger if it doesn't.
 
 g,b = 1, 0 # It's not these, the results change predictably with them.
 @mb.program(input_specs=[mb.TensorSpec(shape=(B,C,1,S)),])

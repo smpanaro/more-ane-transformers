@@ -2,6 +2,8 @@
 
 The conversion from the original model weights to CoreML is lossy. One way to measure the loss is using Peak Signal to Noise Ratio as in [ml-ane-transformers](https://github.com/apple/ml-ane-transformers/blob/da64000fa56cc85b0859bc17cb16a3d753b8304a/ane_transformers/huggingface/test_distilbert.py#L173). Values above 60 are considered faithful reconstructions of the original model.
 
+<sub>PSNR is measured as the median of 5 inferences comparing PyTorch to CoreML using the `check_psnr.py` script.</sub>
+
 <details>
 <summary>gpt2</summary>
 

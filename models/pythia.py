@@ -411,6 +411,49 @@ class GPT(nn.Module):
 
         return model
 
+    ## convert.py
+
+    def sample_inputs(self):
+        vocab_size = self.config.vocab_size
+        max_length = 512
+
+        return OrderedDict({
+            'input_ids': torch.randint(0, vocab_size, (1, max_length,), dtype=torch.int32),
+            'output_mask': torch.tensor([0], dtype=torch.int32),
+        })
+
+    def output_types(self):
+        return OrderedDict({
+            'logits': torch.float16,
+        })
+
+    ## generate.py
+
+    @staticmethod
+    def build_inputs(seq, outputs={}, pad_to_length=None, pad_token_id=-1, dtype=torch.float32, device="cpu"):
+        seqlen = seq.shape[1]
+
+        if not pad_to_length:
+            pad_to_length = seqlen
+        length = pad_to_length
+
+        assert length == seqlen or pad_token_id != -1, "pad token must be provided when padding"
+
+        # Pad the sequence itself too.
+        input_ids = torch.cat([
+            seq.squeeze(),
+            torch.full((pad_to_length - seqlen,), pad_token_id)
+        ]).unsqueeze(0)
+
+        # Used to mask outputs before they exit the model.
+        # input_ids: [0,1,2,3] length = 4, result is in index 3
+        output_mask = torch.tensor([seqlen-1], dtype=torch.int32)
+
+        return {
+            "input_ids": input_ids.int().to(device),
+            "output_mask": output_mask.to(device),
+        }
+
 if __name__ == "__main__":
     import argparse
     from transformers import GPTNeoXForCausalLM, AutoTokenizer

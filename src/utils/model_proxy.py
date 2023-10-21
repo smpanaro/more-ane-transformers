@@ -7,6 +7,9 @@ class MLModelProxy:
         from coremltools.libcoremlpython import _MLModelProxy
         self.__proxy__ = _MLModelProxy(model_path, compute_unit.name)
 
+        # pybind11 functions expose the function description in the docstring.
+        self.supports_input_output_cache = self.__proxy__.predict.__doc__.count(',') == 2
+
     def _update_float16_multiarray_input_to_float32(self, input_data):
         for k, v in input_data.items():
             if isinstance(v, np.ndarray) and v.dtype == np.float16:
@@ -39,13 +42,20 @@ class MLModelProxy:
             #     continue
             input_dict[given_input_name] = convert(given_input)
 
-    def predict(self, data):
+    def predict(self, data, input_output_mapping):
         """
         You are responsible for not passing bad input! If you're not sure and the
         model seems to be hanging, try running with a mlpackage
         """
         # self._verify_input_dict(data)
         self._convert_tensor_to_numpy(data)
+
+        # If we're using my custom build of coremltools that supports
+        # caching of input:output pairs in the ObjC wrapper.
+        if self.supports_input_output_cache:
+            return self.__proxy__.predict(data, input_output_mapping)
+
+        # If not, we must convert to float16.
         self._update_float16_multiarray_input_to_float32(data)
         return self.__proxy__.predict(data)
 

@@ -575,3 +575,318 @@ Cleaning up from the latest batch of experiments. Rought summary:
 |enumerated_shape_split \*|merged with ->|enumerated|no|
 
 <sub>* enumerated_shapes_transformer, multi_variable_inputs are the same idea</sub>
+
+Going to try to implement the fixed size KV cache.
+
+params
+seqlen=128
+maxseqlen=512 (max is model dependent)
+hidden_size=768 (model dependent)
+
+inputs
+input_ids=[1,seqlen] # padded on the LEFT
+kv_cache=[num_layers,1,(maxseqlen-seqlen)*2,hidden_size]
+kv_mask=[1,seqlen,maxseqlen] # really qk mask (should rename)
+output_mask=[1] # index into seqlen, always set to seqlen-1 -- can get rid of but no reason to yet.
+
+outputs
+logits=[1,1,vocab_size]
+new_kv_cache=[num_layers,1,(maxseqlen-seqlen)*2,hidden_size]
+
+Strategy is to concat KV from cache with new KV from input to get the full KV (pretty standard iiuc).
+To compute new_kv_cache slice off the leftmost seqlen elements.
+input_ids will be padded on the left.
+
+## September 17, 2023
+Got it working as above with some small tweaks:
+
+removed output_mask. Just plucks the last index always.
+Added pos_offset=[1] which offsets the the positional embeddings so the first non-padding token gets index 0.
+
+Initial results are promising. With seqlen=128,maxseqlen=512, gpt2 inference is ~50-54ms (Xcode vs CLI). Compared to without a cache (69ms), that's 22-25% faster.
+
+Some profiles, using the CLI measurement in gpt2.py:
+
+**Edit: Disregard this table, it was missing a key optimization.**
+Context Size = maxseqlen
+Input Size = seqlen
+% is speedup compared to without a cache (inferring 512 seq len)
+CLI = gpt2.py main function
+|Model      |Context Size|Input Size|Median CLI (ms)| % |Median Xcode| %  |
+|--         |--          |--        |--             |-- |--          |--
+|gpt2       |512         |32        |40             |42 |--          |--
+|gpt2       |512         |64        |44             |36 |--          |--
+|gpt2       |512         |128       |54             |22 |50          |25
+|gpt2       |512         |256       |73             |-5 |--          |--
+|gpt2-medium|512         |32        |78             |24 |--          |--
+|gpt2-medium|512         |64        |81             |21 |--          |--
+|gpt2-medium|512         |128       |95             |8.7|91          |11.6
+|gpt2-large |512         |128       |158            |25 |142         |32
+
+Generally quite promising. As long as you're expecting more than a handful of tokens as output (probably the norm), these should provided a nice speedup.
+
+Weird that gpt2-medium is an outlier. Vaguely recall seeing more ops on the CPU when run in Xcode. Going to do some profiling and see if I can get a breakdown of CPU vs ANE time.
+
+Oh my. For gpt2-medium, 128 seqlen, 512 max, ~26ms is on the ANE out of 98ms total. Kind of hard to tell just from Instruments, but it kind of looks like a lot of time is spent just shuffling bytes between CPU<>NE. Not sure that we can make that go away. Actually, it looks like it's only ~9ms on the input side of the model, so probably similar on the output side which means the rest is CPU computations.
+
+OH. Just remembered I moved the selecting of the last logit later than it needs to be (after ln_f+lm_head instead of before). Let's put that back. Wow, 95ms -> 52ms (49.5%!).
+
+Output is ever so slightly different (missing a leading paren in the gpt2-medium output). Ugh, should debug, but for now going to let it ride. (Edit: This was caused by the [:, -1,:] slice instead of [:, [-1], :]).
+
+Also, looking at the instruments trace. Looks much more reasonable. Still 9-10ms to pass the input to the ANE and about the same to pass it back out. There is a 2ms hop to CPU at the end, but not sure it's worth chasing down. So in that 50ms span, 20ms is spent just moving all the input bytes in and output bytes out (!).
+
+Actually.. looking at Xcode, it looks like the inner product (tokens <> embeddings) is ~the only thing running on CPU now. So maybe there is a bit on both ends worth looking at (those tensors are large). Just need to do the split/concat trick to get them under 16384. (See [this](https://github.com/RobertRiachi/ANE-Optimized-Whisper-OpenAI/blob/d42252155b8e29b2e2c32e7b911ec647198547fb/model.py#L181C1-L181C1) note in a whisper conversion.)
+
+With earlier logit plucking (caveat their might be a slight inaccuracy in the outputs -- see above), but without split/concat for embeddings:
+
+|Model      |Context Size|Input Size|Median CLI (ms)| % |Median Xcode| %  |
+|--         |--          |--        |--             |-- |--          |--
+|gpt2       |512         |128       |18             |72 |--          |--
+|gpt2-medium|512         |128       |52             |49 |--          |--
+|gpt2-large |512         |128       |--             |-- |139         |33
+
+gpt2-large segfaults when trying to load after conversion now. hmmm. Runs fine in Xcode though. Only thing that changed was moving the plucking of the last logit before ln_f+lm_head.
+
+Chatted a bit with ChatGPT and came up with an idea for moving the intial nn.Embedding call to ANE. The idea is to split the embedding into N embeddings each with size < 16384. Then we take the input_ids and copy them for each split, masking out values that belong to other splits and shifting values that belong to this split so they are zero-indexed. Finally sum the results of all the splits (since the masked out values will be 0 valued).
+
+Even gpt2-medium is segfaulting. Suppose this is better than only large segfaulting, but no clue what I changed. I think it's the difference between `x[:, -1, :]` and `x[:, [-1], :]`. Yeah, it's definitely that. Yikes. Good news though, it fixes the slight output error mentioned above.
+
+Trying the split/concat trick just on the output (will need ^^ for input). It's actually 1-2ms slower for both gpt2 and gpt2-medium. Looks like it still hops to CPU and back, and actually adds an extra CPU hop at the end. Seems like two ops: one general_concat (one can run on ANE though and does not), a gather_nd before all the embedding inner_products. Maybe the latter is from the [-1]? In Instruments, it looks like the inner product at the start itself is fast. So just a question of if moving the 128*768 embeddings is slow. Maybe? But that's peanuts compared to the KV cache.
+
+how many floats?
+4,718,592 for gpt2-mediums KV cache
+65,536 for qk mask (could compute this in-model probably)
+131,072 for the embeddings. eh.
+
+Unrelated: It occurrs to me that Xcode profiler's list of ops is straight-up the espresso plan. Would be nice to get a hand on that for real + visualize it.
+
+## September 27, 2023
+Doesn't seem like gather will run on ANE, no matter the size.
+
+Splitting the final lm_head to fit on ANE actually makes gpt2 slightly slower. Will see if that holds for larger models.
+
+gpt2-large w/ splitting:
+104ms median on the command line
+An example prediction:
+`|[CPU 17ms][ANE 55ms][CPU 2ms][ANE 2ms][CPU 25ms]|`
+
+w/out:
+101ms median on the CLI
+`|[CPU 17ms][ANE 53ms][CPU 6ms][ANE 2ms][CPU 25ms]|`
+
+## September 28, 2023
+gpt2-medium spends 20 of 50ms in the leading/trailing CPU sections. gpt2-large spends 42 of 103ms there. Both are ~40%.
+
+Looking back at how Apple does it. Their models starts like this:
+
+input (1x128x1x3)
+|
+V
+split_nd -(1x128x1x1)-> inner_product(nB=256,  nC=512) -(1x128x1x512)-> add -> add ->
+        |-(1x128x1x1)-> inner_product(nB=15000,nC=512) -(1x128x1x512)---^      ^
+        |-(1x128x1x1)-> inner_product(nB=2    ,nC=512) -(1x128x1x512)----------|
+(all 3 inner products have is_lookup=1, so maybe that's just how gather compiles down to espresso)
+
+Their output is simple:
+logits(1x1x128x512) -> inner_product(nB=512,nC=15000) -> softmax_nd(axis=-1) -> out(1x1x128x15000)
+
+Ooooh, opening the Xcode performance report in Instruments gives more fine-grained information.
+
+For gpt2-large:
+89ms prediction total (in Xcode)
+3ms, 1us, 7us, 700ns Input Copy (guessing that is kv cache, pos_offset, input_ids, qk_mask -- based on sizes)
+11ms, 23us 'Neural Engine - Data Copy'
+400us 'CPU' compute (included in this is 104us of Neural Engine Data Copy)
+55ms Neural Engine Request
+2ms 'CPU' compute
+4ms Neural Engine Request
+22us, 12ms Neural Engine - Data Copy (2 outputs: logits, kv_cache)
+
+I wonder if any of the overhead is float32<>float16. Otherwise not sure what to tune here. Seems like this is the trade-off? Shuffling huge tensors instead of doing the computation.
+
+gpt2-large float16 inputs and outputs:
+110 ms median CLI
+62ms in Xcode
+'Neural Engine - Data Copy' basically goes away
+
+Two takeaways from this:
+- Casting floats is slow.
+- There is some meaningful bottleneck in the Python code now.
+
+Ahhh, coremltools casts all float16 to float32 (on both input and output) because C++ doesn't have a float16 type. Seems like there are some workarounds in PyBind11. The speedup is probably worth at least a look.
+
+Updated it so the output isn't casted. But that means it has to get casted on the way in (since KV cache is passed back in). So now the end conversion is fast, but the start conversion is even slower. Added a conversion at the input end too. Still not as fast as Xcode but took gpt2 from 20ms to 17ms. (Xcode is like 10.5ms). Takes gpt2-large to 91ms on the CLI (from 110ms). Roughly consistent with ~15% improvement for gpt2.
+
+Can't really tell if the remaining ~30% is an artifact of Python<>ObjC or if it's something that the Xcode performance tool doesn't measure. Instruments makes it look like it's all copying/moving buffers.
+
+Easiest thing is probably to write a swift CLI (or see if the one I wrote previously works still).
+
+## September 30, 2023
+Reconsidered the Swift CLI approach for now. Don't really want to translate all of the input building logic into Swift.
+
+Comparing the Xcode instruments trace with the CLI.
+CLI spends most of CPU time in these 2 cousins:
+11.00 ms   22.4%	0 s	 	                                           EspressoLight::espresso_plan::__copy_inputs(std::__1::shared_ptr<EspressoLight::plan_task_t>, std::__1::shared_ptr<Espresso::abstract_batch> const&, int, std::__1::shared_ptr<Espresso::net>)
+11.00 ms   22.4%	11.00 ms	 	                                           bool CoreML::vectorizeMultiArray<_Float16, float>(CoreML::MultiArrayBuffer const&, CoreML::StorageOrder, CoreML::MultiArrayBuffer&)
+
+The Xcode trace does have 1 span of converting float to float16, but only at the beginning of the trace. Maybe it's reused? Hope not.
+
+Looking specifically at the CLI trace, it spends 6ms in PyArray_NewCopy at the end. Maybe can get rid of that by providing an output buffer? 6ms (out of 90ishms) is pretty small though.
+The bigger chunk is the 2 cousins from the beginning, as mentioned above. Maybe there's some way to provide input features that is better?
+
+Would be interesting to use the "provide your own output buffer" for KV cache values, and see if you can just hand that back straight in to the model. Maybe speed up both output and input. The MLPredictionOptions header has good comments (float16 MLMultiArray with a CVPixelBuffer backing sounds interesting).
+
+"Use this initializer to create IOSurface backed MLMultiArray, which can reduce the inference latency by avoiding the buffer copy." in the header for init a MLMultiArray with a buffer. Tried this with an blank buffer, and it is definitely faster. Still a slight bit of overhead compared to the Xcode profile. Need to figure out how to get they numpy data into the buffer now.
+
+Got the data into the buffer. (Well, the generated text is correct. Possible I'm not being entirely safe with memory of course.) Am approaching the Xcode profiler's performance. For gpt2 it is 10.5ms and CLI median is now 14ms. The delta seems to be purely the memcpy (assuming that's _platform_memmove) going from numpy <> C.
+
+gpt2-large comes down to 80ms on the CLI (vs 62 in Xcode).
+
+Think I might have a memory issue (as kind of expected...). gpt2-medium output doesn't look quite right.
+
+So next steps:
+- track down memory corruption (or confirm it's ok)
+- comment in MLPredictionOptions.h "For the best performance, use page-aligned address in MLMultiArray." -- try page-aligning the input buffer
+- See if there's a way to get the CoreML instrument to run for the CLI.
+
+Poking around the console logs, trying to find out how to get the Core ML instrument to work. This is interesting:
+
+"Kernel validation warning tok_emb_cast (inner_product) @ 7: Inner product (is_lookup = True) requires nB to be bounded by 32768. Experienced compilation failures for larger factors in testing."
+Relevant MIL:
+tensor<fp16, [50257, 768]> transformer_wte_weight_to_fp16 = const()[name = tensor<string, []>("transformer_wte_weight_to_fp16"), val = tensor<fp16, [50257, 768]>(BLOBFILE(path = tensor<string, []>("@model_path/weights/weight.bin"), offset = tensor<uint64, []>(64)))];
+tensor<fp16, [1, 128, 768]> tok_emb_cast = gather(axis = tok_emb_axis_0, batch_dims = tok_emb_batch_dims_0, indices = input_ids, x = transformer_wte_weight_to_fp16)[name = tensor<string, []>("tok_emb_cast")];
+
+"Kernel validation warning op_1539_cast (inner_product) @ 524: Output blob dimensions exceed ANE limit."
+MIL:
+tensor<fp16, [1, 1, 50257]> logits = linear(bias = var_1539_bias_0_to_fp16, weight = transformer_wte_weight_to_fp16, x = input_cast)[name = tensor<string, []>("op_1539_cast")];
+
+Cool to finally be able to match these concretely up between Xcode and the MIL.
+
+This is how the Xcode runs the instrument.
+xctrace record --template Core ML --output /var/folders/7p/rj7zj_q13qzg96rw0081xslr0000gn/T/perftab_60254D8E-4F9B-40AD-BC39-DA034FD36293.trace --launch -- com.apple.coremlprofiler 835A2AD4-6450-431F-AF5D-EC26581B70DB
+
+## October 1, 2023
+Set up a Swift app and was able to attain the same performance as the Xcode profiler (using dummy inputs). Interestingly running with ComputeUnit.All was slower than CPUAndNE. Needed to configure the CVPixelBuffer inputs to get good performance, so tried the output backings too -- no effect.
+
+Some interesting symbols:
+MLModelConfiguration - (void)setAllowsInstrumentation:(bool)arg1;
+MLModel - (void)enableInstrumentsTracing;
+
+#1	0x00000001987fac08 in __MLLoggingGetInstrumentsActiveChannel_block_invoke ()
+^ is where os_log_create("com.apple.coreml", "DynamicTracing") is called
+
+MLLoggingAllowsInstrumentation(bool ifTheConfigHasAllowsInstrumentation, char* pathToMlmodelc)
+
+Spent way too long trying to figure out why the CoreML instrument isn't working for my CLI runs.tldr of what I learned: the CoreML instrument is powered by signposts in the "com.apple.coreml" subsystem with the DynamicTracing category. That category is only saved when Instruments is attached. The Instruments "CoreML Package" (in Instruments' settings) transforms these signposts into well-formed data that is used to populate the CoreML instrument in traces. It /seems/ like something in CoreML is preventing those from coming through for my Python CLI -- I'm able to use the python signpost package to manually record DynamicTracing category signposts that show up.
+
+## October 2, 2023
+Realized I can add my own signposts to coremltools. Wrapped both the input features and output features conversion. Provides a nice separation from when control is handed to CoreML. Confirms that the slow memcpy is in my coremltools code and not CoreML. Tried building coremltools in release mode (I had manually set it to debug oops) to see if that helps -- does not seem like it.
+
+The CPU chunk in between the two ANE inferences has been bugging me. Went back to using the split lm_head, but moved the KV cache stack before it. The stack runs on ANE but I _think_ since it was after the split lm_heads cat, we were paying some extra context transfer cost. By putting the stack before the split head (the order doesn't matter), the ANE inference is one solid chunk. ~The same speed for gpt2, but takes gpt2-large to a median of 73ms (last best was 80ms) on CLI and 56ms in the Xcode profiler.
+
+Looking at the total durations for gpt2-large. 7.43s spent in predict, 1.76s spent converting inputs/outputs. Beyond something egregious in the model itself, seems like optimizing the inputs/outputs is the last thing to squeeze.
+
+(I wonder if taking all these learnings back to the ANE-optimized GPT would be beneficial.)
+
+Reading a bunch about how CVPixelBuffer + alignment work. Wondering if that might explain some of the "corruption-y" looking things I was seeing. tldr is CVPixelBufferGetBytesPerRow() != width necessarily.
+
+## October 3, 2023
+Had an idea while I slept for optimizing the inputs/outputs. Added signposts and confirmed the delay is almost entirely the KV cache. The hiccup is that we have to take that big chunk of memory from CVPixelBuffer to Python and then back for the next prediction. We can add a cache for those values inside the ObjC bridge and not even bother sending them to Python. Something a la:
+
+py::dict predict(const py::dict& input, const py::dict& options) const;
+where options = {
+        # cached_key_name is saved from the output (and not returned)
+        # if cached_key_name is saved for this model, it is added to the inputs
+        "cached_input_key_mapping": {
+                "input_key_name": "cached_key_name",
+        },
+        "ignore_cache": True, # for the first prediction
+}
+
+Don't think this would get accepted into coremltools though. Feels a little to hacky/application-specific.
+
+Also, tried the page-aligned MultiArray(dataPointer:...) in Swift for the output buffer. It's slower, despite saying "for best performance". Seems reasonable since IOSurface looks to incur ~no copies.
+
+Last two stones to turn over:
+- get to the bottom of if there is output corruption and why
+- go back one last time and see if splitting the input tok_emb weights is possible to get on ANE
+
+Looking at the latter (more interesting, sue me) and noticed interesting logs from com.apple.CoreAnalytics:
+"Dropping "com.apple.CoreML.MLLoader" as it isn't used in any transform (not in the config or budgeted?)".
+Dropping "com.apple.CoreML.MLPrediction" as it isn't used in any transform (not in the config or budgeted?)
+Those sound a lot like the events that are missing from the CoreML instrument (model load + prediction stats).
+
+## October 4, 2023
+I feel like it might be possible to run the embedding layer (gather) on ANE, but I can't figure out how. I tried to mimic the input to the keyboard LM, but I can't figure out how to arrive at equivalent an espresso net.
+
+Added an assert to see if the CVPixelBuffer was getting padded with extra row bytes (coincidentally all the gpt2 dimensions are divisible by 16, so maybe moot). Has not fired yet. Also experimented with using vImageCopyBuffer (noticed it was used for translating PIL images to CVPixelBuffer). Does not seem to provide a speedup, but is nicer than having to manually handle potential padding issues.
+
+Tested generation on vanilla 7.0b2 for all 3 models and compared with my local changes (float16, CVPixelBuffer, vImage). The generation (argmax) output is the same. So that's probably enough to rule out corruption. Will keep my eyes peeled though.
+
+## October 5, 2023
+Reviewing my notes, and some of the times I have for models early on are much higher than I remember. I should really come back and try the ANE-optimized models again. Not today though.
+
+Was skim-watching a WWDC talk about profiling pytorch MPS. They have some signposts in there for profiling. Might be interesting to peek and see how it works. Would be so nice if there was something like that for ANE.
+
+Tried my caching idea (keep a cache of the kv_cache CVPixelBuffers in CoreMLPython and feed the prior output into the next input). It works great. Am seeing median CLI times of 11.5ms for gpt2 (vs 10.3ms Xcode). gpt2-large is 56.6ms CLI (vs 55.9ms Xcode). Don't think the last ~1ms (which seems like a constant) is worth chasing. Does feel like the Python overhead is near a minimum now -- pretty sweet.
+
+## October 6, 2023
+Got the CoreML instrument working with a plain ObjC++ CLI. The binary needs to have the get-task-allow entitlement. I'm guessing if I signed python with that it would work. However, I don't actually need that since I've added my own signposts to coremltools.
+
+## October 9, 2023
+Was curious and tried running gpt2-large in Xcode 15 on Sonoma. Hoped it would be a bit faster, but it does a bunch of CPU casting/memcpy and is like twice as slow. Something for later.
+
+## October 10, 2023
+Converted gpt2-xl, since I haven't yet seen what it looks like. Seems like there's a bug in coremltools 7.0b2, or in my code, that causes the pipeline stitching to not work. Still works on 6.3 -- will have to look. Also, noticed that the intermediary outputs are all float32. Should see what it takes to convert them to float16.
+
+Had to jump through some hoops. Need to chunk on 7.0b2, then make pipeline on 6.3. And also need to make the intermediary outputs float16, otherwise it won't run on the ANE. But it does run, and the output looks sensible. Median 121ms/it. Wowowow. Proportionally on-par with the other models, but still something since it actually feels usable now.
+
+## October 12, 2023
+With Quinn's help on the developer forums, figured out how to get the CoreML instrument working with the Python CLI. Need to re-sign the Python binary (which is a bit hidden) and give it the get-task-allow entitlement.
+codesign -f -s - /opt/homebrew/Cellar/python@3.10/3.10.12_1/Frameworks/Python.framework/Versions/3.10/Resources/Python.app/Contents/MacOS/Python --entitlements entitlements.xml
+https://developer.apple.com/forums/thread/739159?login=true&page=1#768381022
+
+Was thinking it'd be interesting to chunk up the transformer into a pipeline and see which parts in particular are slow. coremltools' `extract_submodel` seems like it would make it easy enough.
+
+## October 18, 2023
+Fixed a off-by-one bug in the KV cache creation that would cause anything that relied on it to be wrong.
+
+Read an interesting [post](https://kipp.ly/transformer-inference-arithmetic/#kv-cache) that says there is an ideal balance between memory + compute boundedness. Specifically that there's a threshold to KV cache sequence length where memory bandwidth becomes the bottleneck and smaller query sizes don't matter. Figure that would be interesting to probe experimentally. Since we can only have 1 input sequence size, picking an optimal one would be beneficial.
+
+
+|model      |input length|median time (ms)|
+|--         |            |                |
+|gpt2\*     |256         |19.9            |
+|gpt2\*     |192         |14.4            |
+|gpt2\*     |128         |10.9            |
+|gpt2\*     |96          |10.2            |
+|gpt2\*     |64          |8.5             |
+|gpt2\*     |32          |7.6             |
+|gpt2\*     |16          |6.9             |
+|gpt2-large |256         |CoreML errors   |
+|gpt2-large |192         |91.3            |
+|gpt2-large |128         |57              |
+|gpt2-large |96          |53.5            |
+|gpt2-large |64          |45              |
+|gpt2-large |32          |41.1            |
+|gpt2-large |16          |36.7            |
+
+
+<sub>* no CPU ops, so accuracy suffers</sub>
+<sub>all times are median of 200 inferences, M1 Max</sub>
+
+## October 20, 2023
+Realized my KV cache implementation is not awesome for initial prompts > 128. It will ignore everything but the last 128 tokens as implemented. Would be easy-ish to adjust it to infer the first 128 and then 129+ one at a time but that would be painfully slow. Right now I shift the KV Cache by 1 token and then slice off the rightmost 127 columns. e.g.
+```
+# T = 2, input sequence
+# k = [o,o,o,o,o,o][n,n] # k = old_k + new_k
+#       [o,o,o,o,o,n] # output cache
+```
+Two potential solutions:
+- output the full cache and roll it either by 1, or in chunks of 128 until the full initial prompt is consumed
+- try to pass a new input and do a dynamic roll + slice in the model
+
+The first option means shuffling a decent amount more data and also makes it harder to keep the cache out of Python code (ObjC<>Python is sloow).
+The second probably won't run on the ANE, but would make things easier outside the model.
+
+Will try option 2. Think changing the shape of the cache from [layer, batch, 2*seq, dim] to [layer, batch, seq, 2*dim] will make slicing easier.

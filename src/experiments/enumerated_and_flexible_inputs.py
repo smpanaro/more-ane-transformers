@@ -11,6 +11,8 @@ See if it's possible to have a model that takes both an enumerated input
 and a flexible shape input.
 
 (I'm pretty sure 2 enumerated inputs is a no go, but can check that too.)
+
+Seems like it is possible but won't run on the ANE (9/12/23).
 """
 
 C = 768 # channels

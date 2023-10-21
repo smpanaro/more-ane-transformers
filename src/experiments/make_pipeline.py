@@ -57,5 +57,15 @@ if model_range is not None:
 
 # Erroring here? You need coremltools >= 6.3
 pipeline = ct.utils.make_pipeline(*models)
+
+# Fill in metadata.
+first_model = models[0]
+pipeline._spec.description.metadata.author = first_model._spec.description.metadata.author
+pipeline._spec.description.metadata.license = first_model._spec.description.metadata.license
+pipeline._spec.description.metadata.shortDescription = first_model._spec.description.metadata.shortDescription
+pipeline._spec.description.metadata.versionString = first_model._spec.description.metadata.versionString
+for k,v in first_model._spec.description.metadata.userDefined.items():
+    pipeline._spec.description.metadata.userDefined[k] = v
+
 print(f"Saving pipeline model to {output_filename}")
 pipeline.save(output_filename)

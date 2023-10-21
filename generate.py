@@ -14,6 +14,7 @@ import os
 import glob
 from collections import OrderedDict
 import subprocess
+from  os_signpost import Signposter
 
 """
 Load a CoreML model and use it to generate text.
@@ -78,6 +79,8 @@ tok = AutoTokenizer.from_pretrained(tokenizer_name)
 tok.pad_token_id = tok.eos_token_id
 vprint("Loaded tokenizer.")
 
+signposter = Signposter("com.smpanaro.more-ane-transformers", Signposter.Category.PointsOfInterest)
+
 if args.wait:
     print(f"Current PID: {os.getpid()}")
     input("Waiting. Press Enter to continue.")
@@ -88,6 +91,7 @@ mlpackage_path = base_path + ".mlpackage"
 mlmodelc_path = base_path + ".mlmodelc"
 has_compiled_model = os.path.exists(mlmodelc_path)
 if not has_compiled_model:
+    end_compile = signposter.begin_interval("Compile Model")
     # Looking to turn this off? As far as I know it's not worth it.
     # Generating text from a mlpackage does this same compilation every time (slow) and
     # it doesn't get cached so you will actually use _more_ disk space without this.
@@ -101,6 +105,7 @@ if not has_compiled_model:
         print("Failed to compile. Please open an issue (https://github.com/smpanaro/more-ane-transformers/issues) and include the following:")
         print(f"code: {compile_result.returncode}\nstdout: {compile_result.stdout}\nstderr: {compile_result.stderr}")
         print("Predicting using the (slow) mlpackage method.")
+    end_compile()
 
 if has_compiled_model and not os.path.exists(mlpackage_path):
     # TODO: Dump metadata to disk instead so you can keep just the compiled model.
@@ -110,6 +115,7 @@ if has_compiled_model and not os.path.exists(mlpackage_path):
 
 # nano = NanoGPT.from_pretrained("gpt2").eval()
 print(f"Loading model from path {mlmodelc_path if has_compiled_model else mlpackage_path} using {compute_unit}...")
+end_load = signposter.begin_interval("Load Model")
 load_stopwatch = Stopwatch(3)
 model, model_with_metadata = None, None
 if has_compiled_model:
@@ -120,12 +126,14 @@ else:
     model = ct.models.model.MLModel(mlpackage_path, compute_units=compute_unit)
     model_with_metadata = model
 load_stopwatch.stop()
+end_load()
 print(f"Loaded model in {load_stopwatch}.")
 # print(model)
 
+@torch.no_grad()
 def sample(logits, temperature=0.85, top_k=80):
     if isinstance(logits, np.ndarray):
-        logits = torch.from_numpy(logits)
+        logits = torch.from_numpy(logits).float()
     # pluck the logits at the final step and scale by desired temperature
     logits = logits[:, -1, :] / temperature
     # optionally crop the logits to only the top k options
@@ -164,17 +172,34 @@ NUM_INFERENCES = args.length
 
 input_keys = set([f.name for f in model_with_metadata.input_description._fd_spec])
 
+# Different models take different inputs.
+input_builder = None
+input_output_mapping = {}
+if input_keys == set(["input_ids", "output_mask"]):
+    input_builder = Pythia
+elif input_keys == set(["input_ids", "qk_mask", "pos_offset", "kv_cache"]):
+    input_builder = GPT2
+    input_output_mapping["kv_cache"] = "new_kv_cache"
+else:
+    print(f"Unsupported model inputs: {input_keys}.")
+    sys.exit(1)
+
 relevant_tokens = without_pad(ane_inputs["input_ids"])
+outputs = {}
 for i in range(NUM_INFERENCES):
+    end_predict = signposter.begin_interval(f"Predict Token")
     next_index = len(relevant_tokens[0]) - 1
-    ane_inputs = AneGPT.build_inputs(relevant_tokens, pad_to_length=512, pad_token_id=tok.pad_token_id)
-    ane_inputs = {k:v for k,v in ane_inputs.items() if k in input_keys}
+
+    with signposter.use_interval("Build Inputs"):
+        ane_inputs = input_builder.build_inputs(relevant_tokens, outputs=outputs, pad_to_length=512, pad_token_id=tok.pad_token_id)
+        ane_inputs = {k:v for k,v in ane_inputs.items() if k in input_keys}
 
     # attention_mask = ane_inputs["k_mask"].squeeze().unsqueeze(0)
     # print(attention_mask.shape)
     stopwatch.start()
     # Hanging here? It's very likely your intputs are the wrong shape and/or types.
-    logits = model.predict(ane_inputs)["logits"] # nano
+    outputs = model.predict(ane_inputs, input_output_mapping)
+    logits = outputs["logits"] # nano
     # logits = nano(ane_inputs["input_ids"], attention_mask)
     stopwatch.stop()
 
@@ -182,7 +207,8 @@ for i in range(NUM_INFERENCES):
     if logits.shape[1] > 1:
         logits = logits[:, [next_index], :]
 
-    ane_next = sample(logits) #ane_inputs['input_ids'], qk_mask=ane_inputs['qk_mask']))
+    with signposter.use_interval("Sample"):
+        ane_next = sample(logits) #ane_inputs['input_ids'], qk_mask=ane_inputs['qk_mask']))
 
     # Helpful for debugging nonsense generations.
     # print(torch.topk(torch.from_numpy(logits), 20, dim=-1).indices[:, :20, :])
@@ -194,6 +220,7 @@ for i in range(NUM_INFERENCES):
     else:
         print(tok.decode(ane_next), end="")
     sys.stdout.flush()
+    end_predict(f"{i}")
 
 print("\n\n---stats---")
 per_inference = "{:.{}f}ms".format((stopwatch.duration / NUM_INFERENCES) * 1000, 2)

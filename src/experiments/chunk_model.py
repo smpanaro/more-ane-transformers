@@ -106,17 +106,56 @@ class Chunk():
         self.end_op_idx = end_op_idx
         self.cumulative_size_in_mb = cumulative_size_in_mb
 
-    def save(self, prog, name):
+    def save(self, prog, name, model_metadata, input_params, output_params):
         mlmodel = ct.convert(
             prog,
             convert_to="mlprogram",
             compute_units=ct.ComputeUnit.CPU_ONLY,
             minimum_deployment_target=ct.target.iOS16, # TODO: Is this needed?
         )
+
+        if model_metadata.description is not None:
+            mlmodel._spec.description.metadata.shortDescription = model_metadata.description
+        for k,v in model_metadata.kvs.items():
+            mlmodel._spec.description.metadata.userDefined[k] = v
+
+        input_params_by_name = {t.name: t for t in input_params}
+        for i in mlmodel._spec.description.input:
+            if i.name not in input_params_by_name:
+                continue
+            params = input_params_by_name[i.name]
+            if params.default_value is not None:
+                i.type.isOptional = True
+                # make_pipeline doesn't support setting this. might be a bug? not sure.
+                # i.type.multiArrayType.floatDefaultValue = default_values_by_name[i.name]
+                # print(f"updating default value for {i.name} to {default_values_by_name[i.name]}")
+            if params.description is not None:
+                i.shortDescription = params.description
+
+        output_params_by_name = {t.name: t for t in output_params}
+        for o in mlmodel._spec.description.output:
+            if o.name not in output_params_by_name:
+                continue
+            params = output_params_by_name[o.name]
+            if params.description is not None:
+                o.shortDescription = params.description
+
         mlmodel.save(name)
 
     def __repr__(self):
         return f"<Chunk start={self.start_op_idx} end={self.end_op_idx} cumulative_size={self.cumulative_size_in_mb}MB>"
+
+class ModelMetadata():
+    def __init__(self, description, kvs):
+        self.description = description
+        self.kvs = kvs
+
+
+class TensorParams():
+    def __init__(self, name, description, default_value):
+        self.name = name
+        self.description = description
+        self.default_value = default_value
 
 def _get_op_idx_split_locations(prog: Program):
     """ Find the op that approximately bisects the graph as measure by weights size on each side
@@ -186,11 +225,12 @@ def _get_first_chunk_outputs(block, start_op_idx, op_idx):
 def _add_fp32_casts(block, boundary_vars):
     new_boundary_vars = []
     for var in boundary_vars:
-        if var.dtype != types.fp16:
-            new_boundary_vars.append(var)
-        else:
-            fp32_var = mb.cast(x=var, dtype="fp32", name=var.name)
-            new_boundary_vars.append(fp32_var)
+        new_boundary_vars.append(var)
+        # if var.dtype != types.fp16:
+        #     new_boundary_vars.append(var)
+        # else:
+        #     fp32_var = mb.cast(x=var, dtype="fp32", name=var.name)
+        #     new_boundary_vars.append(fp32_var)
     return new_boundary_vars
 
 
@@ -236,7 +276,7 @@ def _make_second_chunk_prog(prog, previous_start_op_idx, start_op_idx, end_op_id
         for var in boundary_vars:
             new_placeholder = Placeholder(
                 sym_shape=var.shape,
-                dtype=var.dtype if var.dtype != types.fp16 else types.fp32,
+                dtype=var.dtype,#if var.dtype != types.fp16 else types.fp32,
                 name=var.name,
             )
             # logger.info(f"New placeholder: {var.name}")
@@ -274,14 +314,38 @@ def _make_second_chunk_prog(prog, previous_start_op_idx, start_op_idx, end_op_id
 
     return prog
 
-def save_chunk(prog_chunk, filename):
-    model_chunk = ct.convert(
-        prog_chunk,
-        convert_to="mlprogram",
-        compute_units=ct.ComputeUnit.CPU_ONLY,
-        minimum_deployment_target=ct.target.iOS16, # TODO: Is this needed?
-    )
-    model_chunk.save(filename)
+def extract_input_params(mlmodel):
+    params = []
+    for i in mlmodel._spec.description.input:
+        name = i.name
+        description = None
+        default_value = None
+        if i.shortDescription is not None and i.shortDescription != "":
+            description = i.shortDescription
+        if i.type.isOptional:
+            default_value = i.type.multiArrayType.floatDefaultValue
+        params.append(TensorParams(name, description, default_value))
+
+    return params
+
+def extract_output_params(mlmodel):
+    params = []
+    for o in mlmodel._spec.description.output:
+        name = o.name
+        description = None
+        if o.shortDescription is not None and o.shortDescription != "":
+            description = o.shortDescription
+        params.append(TensorParams(name, description, None))
+    return params
+
+def extract_model_metadata(mlmodel):
+    description = None
+    if mlmodel._spec.description.metadata.shortDescription is not None and mlmodel._spec.description.metadata.shortDescription != "":
+        description = mlmodel._spec.description.metadata.shortDescription
+    kvs = {}
+    for k,v in mlmodel._spec.description.metadata.userDefined.items():
+        kvs[k] = v
+    return ModelMetadata(description, kvs)
 
 def main(args):
     os.makedirs(args.o, exist_ok=True)
@@ -304,6 +368,11 @@ def main(args):
 
     # Load the MIL Program from MLModel
     prog = _load_prog_from_mlmodel(model)
+
+    # Extract any inputs that have optional/default values so they can be applied post-conversion.
+    input_params = extract_input_params(model)
+    output_params = extract_output_params(model)
+    model_metadata = extract_model_metadata(model)
 
     logger.info(f"Total ops: {len(prog.functions['main'].operations)}")
 
@@ -329,7 +398,7 @@ def main(args):
         logger.info(f"Converting and saving chunk #{idx} from op {chunk.start_op_idx}-{chunk.end_op_idx}")
         is_last = chunk.end_op_idx == chunks[-1].end_op_idx
         prog_chunkn = _make_second_chunk_prog(full_prog, prev_start_index, chunk.start_op_idx, chunk.end_op_idx, is_last=is_last)
-        chunk.save(prog_chunkn, filename)
+        chunk.save(prog_chunkn, filename, model_metadata, input_params, output_params)
 
         del full_prog
         del prog_chunkn
