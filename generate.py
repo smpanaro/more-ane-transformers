@@ -12,6 +12,7 @@ import argparse
 import sys
 import os
 import glob
+import math
 from collections import OrderedDict
 import subprocess
 from  os_signpost import Signposter
@@ -32,11 +33,13 @@ compute_unit_by_name = OrderedDict([
 parser = argparse.ArgumentParser(description='Load a CoreML modelpackage and generate some text.')
 parser.add_argument('--model_path', help='path to .mlpackage file', default="gpt2.mlpackage", type=str)
 parser.add_argument('--input_prompt', help='input prompt for the model', default="Before boarding your rocket to Mars, remember to pack these items:", type=str)
-parser.add_argument('--compute_unit', help='compute unit', type=str, choices=list(compute_unit_by_name.keys()), default="All")
+parser.add_argument('--compute_unit', help='compute unit', type=str, choices=list(compute_unit_by_name.keys()), default="CPUAndANE")
 parser.add_argument('--length', help='number of new tokens to generate', type=int, default=40)
 parser.add_argument('--verbose', help='print verbose logs', type=bool, default=False)
 parser.add_argument('--wait', help='wait for confirmation before loading the model (ie to attach a debugger)', action="store_true")
 parser.add_argument('--use-mlpackage', help='don\'t automatically generate a mlmodelc and use it. dramatically slower but useful for debugging this script.', action="store_true")
+parser.add_argument('--argmax', help='use deterministic argmax instead of multinomial sampling', action="store_true")
+parser.add_argument('--timingstats', help='print verbose timing stats', action="store_true")
 
 args = parser.parse_args()
 
@@ -85,11 +88,15 @@ if args.wait:
     print(f"Current PID: {os.getpid()}")
     input("Waiting. Press Enter to continue.")
 
+# total time from model load to eval end
+total_stopwatch = Stopwatch(3)
+
 # Compile to make generations 2-n much much faster.
 base_path = args.model_path.replace(".mlpackage/", "").replace(".mlmodelc/", "").replace(".mlpackage", "").replace(".mlmodelc", "")
 mlpackage_path = base_path + ".mlpackage"
 mlmodelc_path = base_path + ".mlmodelc"
 has_compiled_model = os.path.exists(mlmodelc_path)
+did_compile_model = False
 if not has_compiled_model:
     end_compile = signposter.begin_interval("Compile Model")
     # Looking to turn this off? As far as I know it's not worth it.
@@ -105,6 +112,7 @@ if not has_compiled_model:
         print("Failed to compile. Please open an issue (https://github.com/smpanaro/more-ane-transformers/issues) and include the following:")
         print(f"code: {compile_result.returncode}\nstdout: {compile_result.stdout}\nstderr: {compile_result.stderr}")
         print("Predicting using the (slow) mlpackage method.")
+    did_compile_model = True
     end_compile()
 
 if has_compiled_model and not os.path.exists(mlpackage_path):
@@ -131,7 +139,7 @@ print(f"Loaded model in {load_stopwatch}.")
 # print(model)
 
 @torch.no_grad()
-def sample(logits, temperature=0.85, top_k=80):
+def sample_multinomial(logits, temperature=0.85, top_k=80):
     if isinstance(logits, np.ndarray):
         logits = torch.from_numpy(logits).float()
     # pluck the logits at the final step and scale by desired temperature
@@ -143,6 +151,13 @@ def sample(logits, temperature=0.85, top_k=80):
     probs = torch.nn.functional.softmax(logits, dim=-1)
     return torch.multinomial(probs.squeeze(), num_samples=1)
 
+@torch.no_grad()
+def sample_argmax(logits):
+    if isinstance(logits, np.ndarray):
+        logits = torch.from_numpy(logits).float()
+    return torch.argmax(logits[:, -1, :], dim=-1)
+sample = sample_argmax if args.argmax else sample_multinomial
+
 text = args.input_prompt
 inputs = tok(text, return_tensors="pt")
 vprint("Tokenized initial inputs:", inputs["input_ids"].shape)
@@ -152,21 +167,11 @@ vprint({k: v.shape for k,v in ane_inputs.items()})
 vprint({k: v.dtype for k,v in ane_inputs.items()})
 # vprint({k: v.__class__ for k,v in ane_inputs.items()})
 
-def get_start_idx(ids):
-    ids = ids.tolist()[0]
-    if tok.pad_token_id in ids:
-        return ids.index(tok.pad_token_id)
-    return len(ids)
-
 def from_numpy(d):
     return {k: torch.from_numpy(v) for k,v in d.items()}
 
 def without_pad(ids):
     return ids[ids != tok.pad_token_id].unsqueeze(0)
-
-stopwatch = Stopwatch(3)
-stopwatch.stop()
-stopwatch.reset()
 
 NUM_INFERENCES = args.length
 
@@ -174,40 +179,88 @@ input_keys = set([f.name for f in model_with_metadata.input_description._fd_spec
 
 # Different models take different inputs.
 input_builder = None
-input_output_mapping = {}
+prompt_input_output_mapping = {}
+generation_input_output_mapping = {}
 if input_keys == set(["input_ids", "output_mask"]):
     input_builder = Pythia
-elif input_keys == set(["input_ids", "qk_mask", "pos_offset", "kv_cache"]):
+elif input_keys == set(["input_ids", "full_sequence_length", "kv_cache"]):
     input_builder = GPT2
-    input_output_mapping["kv_cache"] = "new_kv_cache"
+    prompt_input_output_mapping["kv_cache"] = "prompt_kv_cache"
+    prompt_input_output_mapping["fake_key"] = "generation_kv_cache" # needed for transition from prompt -> generation. todo: better API for this.
+    generation_input_output_mapping["kv_cache"] = "generation_kv_cache"
+    generation_input_output_mapping["fake_key"] = "prompt_kv_cache" # avoid converting to python (speed). todo: better API for this.
 else:
     print(f"Unsupported model inputs: {input_keys}.")
     sys.exit(1)
 
 relevant_tokens = without_pad(ane_inputs["input_ids"])
 outputs = {}
+pad_to_length = 512
+
+input_ids_length = {f.name: f for f in model_with_metadata.input_description._fd_spec}["input_ids"].type.multiArrayType.shape[-1]
+prompt_chunks = math.ceil(len(relevant_tokens[0]) / input_ids_length)
+
+prompt_stopwatch = Stopwatch(3)
+end_prompt_processing = signposter.begin_interval(f"Process Prompt Chunks")
+for i in range(prompt_chunks):
+    end_predict = signposter.begin_interval(f"Predict Prompt")
+    with signposter.use_interval("Build Inputs"):
+        input_args = {
+            'input_length': input_ids_length,
+            'outputs': outputs,
+            'pad_to_length': pad_to_length,
+            'pad_token_id': tok.pad_token_id,
+            'prompt_chunk_idx': i,
+        }
+        ane_inputs =  input_builder.build_inputs(relevant_tokens, **input_args)
+        ane_inputs = {k:v for k,v in ane_inputs.items() if k in input_keys}
+
+    outputs = model.predict(ane_inputs, prompt_input_output_mapping)
+    # Just pass outputs into the next iteration to build up the KV cache (if needed).
+    end_predict(f"{i}")
+
+# Last prompt chunk generates the first new token.
+with signposter.use_interval("Sample"):
+    logits = outputs["logits"]
+    # If the model does not pre-select the next token logits, do so now.
+    if logits.shape[1] > 1:
+        logits = logits[:, [next_index], :]
+    ane_next = sample(logits) #ane_inputs['input_ids'], qk_mask=ane_inputs['qk_mask']))
+print(f"\n\033[95m[Prompt] {tok.decode(relevant_tokens.squeeze())}\033[0m", end="")
+relevant_tokens = torch.cat((relevant_tokens.squeeze(), torch.tensor([ane_next]))).unsqueeze(0)
+print(tok.decode(ane_next), end="")
+sys.stdout.flush()
+
+end_prompt_processing(f"{prompt_chunks}")
+prompt_stopwatch.stop()
+
+# non-prompt generations
+generation_stopwatch = Stopwatch(3)
 for i in range(NUM_INFERENCES):
     end_predict = signposter.begin_interval(f"Predict Token")
     next_index = len(relevant_tokens[0]) - 1
 
     with signposter.use_interval("Build Inputs"):
-        ane_inputs = input_builder.build_inputs(relevant_tokens, outputs=outputs, pad_to_length=512, pad_token_id=tok.pad_token_id)
+        input_args = {
+            'input_length': input_ids_length,
+            'outputs': outputs,
+            'pad_to_length': pad_to_length,
+            'pad_token_id': tok.pad_token_id,
+        }
+        ane_inputs = input_builder.build_inputs(relevant_tokens, **input_args)
         ane_inputs = {k:v for k,v in ane_inputs.items() if k in input_keys}
 
     # attention_mask = ane_inputs["k_mask"].squeeze().unsqueeze(0)
     # print(attention_mask.shape)
-    stopwatch.start()
     # Hanging here? It's very likely your intputs are the wrong shape and/or types.
-    outputs = model.predict(ane_inputs, input_output_mapping)
+    outputs = model.predict(ane_inputs, generation_input_output_mapping)
     logits = outputs["logits"] # nano
     # logits = nano(ane_inputs["input_ids"], attention_mask)
-    stopwatch.stop()
-
-    # If the model does not pre-select the next token logits, do so now.
-    if logits.shape[1] > 1:
-        logits = logits[:, [next_index], :]
 
     with signposter.use_interval("Sample"):
+        # If the model does not pre-select the next token logits, do so now.
+        if logits.shape[1] > 1:
+            logits = logits[:, [next_index], :]
         ane_next = sample(logits) #ane_inputs['input_ids'], qk_mask=ane_inputs['qk_mask']))
 
     # Helpful for debugging nonsense generations.
@@ -215,15 +268,37 @@ for i in range(NUM_INFERENCES):
     # print("chose", ane_next, "from idx:", next_index)
 
     relevant_tokens = torch.cat((relevant_tokens.squeeze(), torch.tensor([ane_next]))).unsqueeze(0)
-    if i == 0:
-        print(f"\n\033[95m[Prompt] {tok.decode(relevant_tokens.squeeze())}\033[0m", end="")
-    else:
-        print(tok.decode(ane_next), end="")
+    print(tok.decode(ane_next), end="")
     sys.stdout.flush()
     end_predict(f"{i}")
 
-print("\n\n---stats---")
-per_inference = "{:.{}f}ms".format((stopwatch.duration / NUM_INFERENCES) * 1000, 2)
-print("Compute Unit:", args.compute_unit)
-print(stopwatch, "total")
-print(f"{per_inference}/it")
+generation_stopwatch.stop()
+total_stopwatch.stop()
+
+load_duration = "{:.{}f} ms".format(load_stopwatch.duration*1000, 2)
+total_duration = "{:.{}f} ms".format(total_stopwatch.duration*1000, 2)
+total_prompt_duration = "{:.{}f} ms".format(prompt_stopwatch.duration*1000, 2)
+prompt_per_token = "{:.{}f} ms".format((prompt_stopwatch.duration / (prompt_chunks*input_ids_length)) * 1000, 2)
+prompt_per_second = "{:.{}f} tokens/s".format((prompt_chunks*input_ids_length) / prompt_stopwatch.duration, 2)
+total_generation_duration = "{:.{}f} ms".format(generation_stopwatch.duration*1000, 2)
+generation_per_token = "{:.{}f} ms".format((generation_stopwatch.duration / NUM_INFERENCES) * 1000, 2)
+generation_per_second = "{:.{}f} tokens/s".format(NUM_INFERENCES / generation_stopwatch.duration, 2)
+
+first_load_caveat = " [uncached load, cached loads will be faster]" if did_compile_model else ""
+
+
+if args.timingstats:
+    kl = 20
+    vl = max([len(v) for v in [load_duration, total_prompt_duration, total_generation_duration, total_duration]])
+    print(f"\n\n{'---stats---':>{kl}}")
+    print(f"{'compute unit:':>{kl}} {args.compute_unit}")
+    print(f"{'model load time:':>{kl}} {load_duration:<{vl}}{first_load_caveat}")
+    print(f"{'prompt eval time:':>{kl}} {total_prompt_duration:<{vl}} : {prompt_per_token}/token : {prompt_per_second}")
+    print(f"{'new token eval time:':>{kl}} {total_generation_duration:<{vl}} : {generation_per_token}/token : {generation_per_second}")
+    print(f"{'total time:':>{kl}} {total_duration:<{vl}}")
+else:
+    print("\n\n---stats---")
+    # default to easier to understand stats
+    print("Compute Unit:", args.compute_unit)
+    print(f"{total_duration} total")
+    print(f"{generation_per_token}/token")

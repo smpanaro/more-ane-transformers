@@ -91,7 +91,7 @@ class CausalSelfAttention(nn.Module):
             #                             .view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x, attention_mask, kv_config):
-        # kv_cache (B, T*2, C)
+        # kv_cache (B, T, C*2)
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -102,7 +102,7 @@ class CausalSelfAttention(nn.Module):
             # kv_mask = kv_config.kv_mask
 
             new_q, new_k, new_v = q,k,v # new_q, new_k, new_v = [B, 1, n_embd]
-            old_k, old_v = kv_cache.chunk(2, dim=1) # each (B, T, C)
+            old_k, old_v = kv_cache.chunk(2, dim=2) # each (B, T, C)
             # replace the row indicated by output_mask with the new values
 
             # Many ways to overwrite a row in a matrix (old K) with a new value (new K).
@@ -156,9 +156,7 @@ class CausalSelfAttention(nn.Module):
 
             B,T,C = k.size()
 
-        # Slide the window right by T and drop the oldest token.
-        cache_end_idx = k.shape[1]-x.shape[1]+1
-        current_cache = torch.cat([k[:,1:cache_end_idx,:], v[:,1:cache_end_idx,:]], dim=1)
+        current_cache = torch.cat([k, v], dim=2)
 
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, q.size()[1], self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
@@ -309,7 +307,19 @@ class GPT(nn.Module):
             s = s + r
         return s
 
-    def forward(self, input_ids, pos_offset=None, kv_cache=None, qk_mask=None, seqlen=512):
+    def forward(self,
+        input_ids,
+        full_sequence_length=None,
+        kv_cache=None,
+        context_length=512):
+        """
+        input_ids [batch, input_length]: input_length is a fixed size < 512, chosen as a compromise
+            between computing the initial prompt and inferring each single token afterwards
+        full_sequence_length [total_length]: the total length of the sequence, including parts
+            that have fallen out of input_ids or even the context window, but excluding padding
+        kv_cache [# layers, batch size, context_length-input_length, hidden size*2]
+        context_length [1]: the maximum number of tokens that the model can evaluate at once
+        """
         # assert kv_cache is None or idx.shape[1] == 1, f"kv cache is only supported for single token inputs not {idx.shape}"
         idx = input_ids
         return_kv_cache = kv_cache is not None
@@ -323,9 +333,8 @@ class GPT(nn.Module):
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
 
-        # FIXME: This needs to be shifted somehow.
         # pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0) # shape (1, t)
-        pos_offset = pos_offset if pos_offset else 0
+        pos_offset = t - full_sequence_length if full_sequence_length else 0
         pos = (torch.arange(0, t, dtype=torch.long, device=device) - pos_offset) # Shift so the first valid token is pos 0.
         pos = pos.maximum(torch.zeros(t, dtype=torch.long)) # Anything < 0 is a padding token, so set it to any valid index.
         pos = pos.unsqueeze(0) # shape (1, t)
@@ -341,16 +350,11 @@ class GPT(nn.Module):
         # attention_mask = (1 - torch.tril(torch.ones((1,1,idx.shape[1],idx.shape[1]), dtype=torch.float32))) * -1e4
         # print(attention_mask)
 
-        attention_mask = qk_mask
+        qk_mask = GPT.make_qk_mask(t, context_length, full_sequence_length)
 
-        # kv_cache [# layers, batch size 1, seqlen * 2 = 512*2, hidden size 768]
+        # kv_cache [# layers, batch size 1, seqlen = 512, hidden size *2 = 768*2]
         if kv_cache is None:
             kv_cache = [None]*len(self.transformer.h)
-        else:
-            # FIXME: This is certainly wrong.
-            # pos = output_mask.unsqueeze(0)
-            pass
-            # attention_mask = torch.index_select(attention_mask, 2, output_mask)
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
@@ -363,7 +367,7 @@ class GPT(nn.Module):
         head_index = 0
         for (block, cache) in zip(self.transformer.h, kv_cache):
             kv_config = CacheConfig(cache, qk_mask, None, head_index)
-            x, block_new_kv_cache = block(x, attention_mask, kv_config)
+            x, block_new_kv_cache = block(x, qk_mask, kv_config)
             new_kv_cache.append(block_new_kv_cache)
             head_index += 1
 
@@ -375,9 +379,15 @@ class GPT(nn.Module):
 
         x = self.transformer.ln_f(x)
 
-        # [# layers, batch size 1, seqlen * 2 = 512*2, hidden size 768]
-        # same as input
-        new_kv_cache = torch.stack(new_kv_cache)
+        # [# layers, batch size 1, seqlen = 512, hidden size *2 = 768*2]
+        # Do this here, since it can run on the ANE.
+        if return_kv_cache:
+            full_kv_cache = torch.stack(new_kv_cache)
+            input_length = idx.shape[1]
+            # for inferring batches of tokens at once, like when ingesting the initial prompt
+            prompt_kv_cache = full_kv_cache[:, :, input_length:, :]
+            # for inferring a single new token (that was appened to the end of input_ids)
+            generation_kv_cache = full_kv_cache[:, :, 1:-(input_length-1), :]
 
         # Splitting and catting below is equivalent to this.
         # logits = self.lm_head(x)
@@ -388,11 +398,21 @@ class GPT(nn.Module):
         # Slight slower for gpt2 (2ms), but faster for larger models (gpt2-large 140 to 100ms).
         # This duplicates the lm_head weights (~75MB for gpt2).
         splits = self.lm_head.weight.split(self.lm_head.weight.shape[0]//4, dim=0)
-        # This cat doesn't run on ANE. Do it last, so we don't jump ANE -> CPU -> ANE.
+        # This cat doesn't run on ANE (but the einsum does!). Do it last, so we don't jump ANE -> CPU -> ANE.
         logits = torch.cat([torch.einsum('bid,jd->bij', x, split) for split in splits], dim=-1)#.view(*x.shape[:2], -1)
 
         if return_kv_cache:
-            return logits, new_kv_cache
+            # Brutally slow (11->20ms for gpt2), but seems to work and support flexible offsets.
+            # Note: this requires mapping resolve_conj/resolve_neg to mb.identity -- not sure why torch traces it like that.
+            # indices = torch.add(next_input_id_length, torch.arange(384, dtype=torch.int32))
+            # new_kv_cache = full_kv_cache.index_select(2, indices)
+
+            # Requires adding support for the narrow op (which is possible), but still is dynamic
+            # which means it gets punted to CPU and is slow (in this case forcing the whole model to CPU).
+            # new_kv_cache = torch.narrow(full_kv_cache, 2, next_input_id_length, seqlen-128)
+
+            # print("new kv cache:", new_kv_cache.shape, next_input_id_length, seqlen-t+next_input_id_length)
+            return logits, prompt_kv_cache, generation_kv_cache
 
         return logits
 
@@ -512,57 +532,63 @@ class GPT(nn.Module):
         num_layer = self.config.n_layer
         hidden_size = self.config.n_embd
 
-        seqlen = 128 # max input_ids length -- balance between speed of 1st and 2nd+ predictions
+        seqlen = 64 # max input_ids length -- balance between speed of 1st and 2nd+ predictions
         maxseqlen = 512 # maximum context length for this model
         cachelen = maxseqlen-seqlen # kv_cache length
 
         return OrderedDict({
             'input_ids': torch.randint(0, vocab_size, (1, seqlen,), dtype=torch.int32),
-            'pos_offset': torch.randint(0, seqlen, (1,), dtype=torch.int32),
-            'kv_cache': torch.randn((num_layer, 1, cachelen*2, hidden_size), dtype=torch.float16),
-            'qk_mask': torch.zeros((1,1,seqlen, maxseqlen), dtype=torch.float16),
+            'full_sequence_length': torch.randint(0, seqlen, (1,), dtype=torch.int32),
+            'kv_cache': torch.randn((num_layer, 1, cachelen, hidden_size*2), dtype=torch.float16),
         })
 
     def output_types(self):
         return OrderedDict({
             'logits': torch.float16,
-            'new_kv_cache': torch.float16,
+            "prompt_kv_cache": torch.float16,
+            "generation_kv_cache": torch.float16,
         })
 
     ## generate.py
 
     @staticmethod
-    def build_inputs(seq, outputs={}, pad_to_length=None, pad_token_id=-1, dtype=torch.float16, device="cpu"):
-        seqlen = 128 # make configurable?
+    def build_inputs(seq, outputs={}, input_length=None, pad_to_length=None, pad_token_id=-1, prompt_chunk_idx=None):
         maxseqlen = pad_to_length
-        cachelen = maxseqlen-seqlen
+        seqlen = input_length if input_length else pad_to_length
 
-        if seq.shape[-1] > maxseqlen:
-            seq = seq[:, -maxseqlen:]
+        is_prompt = prompt_chunk_idx is not None
 
         input_ids_seq = seq
-        if seq.shape[-1] > seqlen:
+        if seq.shape[-1] > seqlen and not is_prompt:
             input_ids_seq = seq[:, -seqlen:]
 
-        input_ids = torch.cat([
-            torch.full((seqlen - input_ids_seq.shape[-1],), pad_token_id), # can be any token, these are ignored
-            input_ids_seq.squeeze(-1) if input_ids_seq.shape[-1] == 1 else input_ids_seq.squeeze(),
-        ]).unsqueeze(0).int().numpy()
+        prompt_pad_amount = 0 if seq.shape[-1] % seqlen == 0 else seqlen - (seq.shape[-1] % seqlen)
+        generation_pad_amount = seqlen - input_ids_seq.shape[-1]
+        pad_amount = prompt_pad_amount if is_prompt else generation_pad_amount
 
-        pos_offset = torch.tensor([seqlen - seq.shape[1]]).int().numpy()
-        # kv_cache = torch.zeros((num_layers, 1, cachelen*2, hidden_size)).half().numpy()
-        qk_mask = GPT.make_qk_mask(seqlen, maxseqlen, seq.shape[-1]).half().numpy()
+        input_ids = torch.cat([
+            torch.full((pad_amount,), pad_token_id), # can be any token, these are ignored
+            input_ids_seq.squeeze(-1) if input_ids_seq.shape[-1] == 1 else input_ids_seq.squeeze(),
+        ]).unsqueeze(0).int()
+
+        if is_prompt:
+            input_ids = input_ids.split(seqlen, dim=-1)[prompt_chunk_idx]
+
+        prompt_full_sequence_length = (prompt_chunk_idx+1)*seqlen - prompt_pad_amount if is_prompt else None
+        generation_sequence_length = seq.shape[-1]
+        full_sequence_length = torch.tensor([prompt_full_sequence_length if is_prompt else generation_sequence_length]).int().numpy()
 
         inputs = {
-            "input_ids": input_ids,
-            "pos_offset": pos_offset,
-            "qk_mask": qk_mask,
+            "input_ids": input_ids.numpy(),
+            "full_sequence_length": full_sequence_length,
         }
 
         # If we need to forward the kv_cache, do so.
         # Stock coremltools requires this, but my custom build handles it internally.
-        if 'new_kv_cache' in outputs:
-            inputs['kv_cache'] = outputs['new_kv_cache']
+        if is_prompt and 'prompt_kv_cache' in outputs:
+            inputs['kv_cache'] = outputs['prompt_kv_cache']
+        elif is_prompt and 'generation_kv_cache' in outputs:
+            inputs['kv_cache'] = outputs['generation_kv_cache']
 
         return inputs
 
@@ -589,16 +615,27 @@ class GPT(nn.Module):
         # [ -1 -1 -1 -1  0  0  0  0  0]
         #    ^  ^  ^  ^ -- ignore the leading K tokens
 
-        m = (1 - torch.tril(torch.ones((currseqlen, currseqlen), dtype=torch.float32))) * -1e4
-        # Crop any rows off that overflow at the top when currseqlen > seqlen.
-        m = m[-seqlen:, :]
-        # Add the ignored leading rows for Q tokens when currseqlen < seqlen
-        m = torch.cat([torch.ones((max(0, seqlen-currseqlen), currseqlen)) * -1e4, m], dim=0)
-        # Add the ignored leading columns for K tokens
-        m = torch.cat([torch.ones((seqlen, maxseqlen-currseqlen,)) * -1e4, m], dim=1)
-        # print("m", m)
-        # print("m", m.shape, "\n", m[:5, 512-132:512-124])
-        # print(m[-5:, -3:])
+        # An alternate implementation that might be easier to understand, but doesn't work with CoreML.
+        # Also doesn't work once currseqlen > maxseqlen.
+        # m = (1 - torch.tril(torch.ones((currseqlen, currseqlen), dtype=torch.float32))) * -1e4
+        # # Crop any rows off that overflow at the top when currseqlen > seqlen.
+        # m = m[-seqlen:, :]
+        # # Add the ignored leading rows for Q tokens when currseqlen < seqlen
+        # m = torch.cat([torch.ones((max(0, seqlen-currseqlen), currseqlen)) * -1e4, m], dim=0)
+        # # Add the ignored leading columns for K tokens
+        # m = torch.cat([torch.ones((seqlen, maxseqlen-currseqlen,)) * -1e4, m], dim=1)
+        # m = m.unsqueeze(0).unsqueeze(0)
+
+        # Works on CoreML (CPU only) and also when currseqlen > maxseqlen.
+        # Build a triangular matrix starting from the bottom right and extending up and to the left.
+        m = (1 - torch.tril(torch.ones((seqlen, maxseqlen), dtype=torch.float16), diagonal=maxseqlen-seqlen)) * -1e4
+        # Mask the leading Q tokens when currseqlen < seqlen
+        # m[:max(0, seqlen-currseqlen), :] = -1 # Would be simpler, but doesn't work with CoreML.
+        all_mask = torch.full_like(m, -1e4, dtype=torch.float16)
+        m = torch.where(torch.arange(m.size(0)).unsqueeze(-1) < max(0, seqlen-currseqlen), all_mask, m)
+        # Mask the leading K tokens.
+        m = torch.where(torch.arange(m.size(1)) < max(0, maxseqlen-currseqlen), all_mask, m)
+
         m = m.unsqueeze(0).unsqueeze(0)
 
         return m
@@ -700,7 +737,7 @@ if __name__ == "__main__":
 
                 return y, new_cache
 
-        seqlen = 128
+        seqlen = 64
         maxseqlen = 512
         cachelen = maxseqlen-seqlen
 
@@ -728,12 +765,12 @@ if __name__ == "__main__":
             model = GPT.from_pretrained(model_name)
             model.eval()
 
-            kv_cache_shape = (num_layers, 1, cachelen*2,hidden_size)
+            kv_cache_shape = (num_layers, 1, cachelen,hidden_size*2)
             # kv_mask = torch.ones(1, maxseqlen, hidden_size)
-            qk_mask = GPT.make_qk_mask(seqlen, maxseqlen, seqlen)
+            # qk_mask = GPT.make_qk_mask(seqlen, maxseqlen, seqlen)
 
             # Trace just the cached model.
-            traced_cached_model = torch.jit.trace(model, (input_ids, torch.tensor([seqlen-1]), torch.ones(kv_cache_shape), qk_mask))
+            traced_cached_model = torch.jit.trace(model, (input_ids, torch.tensor([seqlen-1]), torch.ones(kv_cache_shape)))
 
             # Trace just the full model.
             # traced_full_model = torch.jit.trace(double, (input_ids, torch.tensor([maxseqlen-1]), torch.zeros(kv_cache_shape), kv_mask))
@@ -742,21 +779,22 @@ if __name__ == "__main__":
             # scripted_model = torch.jit.script(double)
 
         def convert_model(traced_model, name):
+            all_shapes = [[1, 1, hidden_size], [1, seqlen, hidden_size]]
             print(traced_model.code)
             prog = ct.convert(traced_model,
                 # Inputs and outputs must be float32 or performance crawls.
                 inputs=[
                     ct.TensorType(name="input_ids", shape=[1, seqlen], dtype=np.int32),
-                    # ct.TensorType(name="output_mask", shape=[1], dtype=np.int32),
-                    ct.TensorType(name="pos_offset", shape=[1], dtype=np.int32), # maxseqlen - currseqlen - 1
-                    ct.TensorType(name="kv_cache", shape=[num_layers, 1, cachelen*2, hidden_size], dtype=np.float16),
-                    ct.TensorType(name="qk_mask", shape=[1, 1,seqlen, maxseqlen], dtype=np.float16),
+                    ct.TensorType(name="full_sequence_length", shape=[1], dtype=np.int32),
+                    ct.TensorType(name="kv_cache", shape=[num_layers, 1, cachelen, hidden_size*2], dtype=np.float16),
+                    # ct.TensorType(name="qk_mask", shape=[1, 1,seqlen, maxseqlen], dtype=np.float16),
                 ],
                 outputs=[
                     ct.TensorType(name="logits", dtype=np.float16),
-                    ct.TensorType(name="new_kv_cache", dtype=np.float16),
+                    ct.TensorType(name="prompt_kv_cache", dtype=np.float16),
+                    ct.TensorType(name="generation_kv_cache", dtype=np.float16),
                 ],
-                minimum_deployment_target=ct.target.iOS16, # TODO: Is this needed?
+                minimum_deployment_target=ct.target.iOS16,
                 convert_to="milinternal")
 
             print(prog)
@@ -784,30 +822,56 @@ if __name__ == "__main__":
         tok = AutoTokenizer.from_pretrained("gpt2")
         # seq = tok("would the real slim", return_tensors="pt")["input_ids"]
         seq = tok("the quick brown fox", return_tensors="pt")["input_ids"]
+
+        # Pad to a multiple of the input size.
+        num_padding = 0 if seq.shape[-1] % seqlen == 0 else seqlen - (seq.shape[-1] % seqlen)
         input_ids = torch.cat([
-            torch.full((seqlen - seq.shape[-1],), tok.eos_token_id), # can be any token, these are ignored
+            torch.full((num_padding,), tok.eos_token_id), # can be any token, these are ignored
             seq.squeeze(),
         ]).unsqueeze(0)
-        num_padding = 3
-        original_inputs = {
-            "input_ids": input_ids.int().numpy(),
-            # "output_mask": torch.tensor([seq.shape[1]-1+num_padding]).int().numpy(),
-            "pos_offset": torch.tensor([seqlen - seq.shape[1]]).int().numpy(),
-            "kv_cache": torch.zeros((num_layers, 1, cachelen*2, hidden_size)).half().numpy(),
-        }
-        # original_inputs["kv_mask"] = build_kv_mask(original_inputs["output_mask"], seqlen=seqlen, hidden_size=hidden_size)
-        # original_inputs["qk_mask"] = GPT.make_qk_mask(seqlen, maxseqlen, seqlen).numpy()
-        original_inputs["qk_mask"] = GPT.make_qk_mask(seqlen, maxseqlen, seq.shape[-1]).half().numpy()
-        # original_outputs = full_mlmodel.predict(original_inputs)
 
-        # Specify that we want to save the new_kv_cache output and apply it as the next prediction's kv_cache input.
+        from  os_signpost import Signposter
+        signposter = Signposter("com.smpanaro.more-ane-transformers", Signposter.Category.PointsOfInterest)
+
+        # Only thing we're doing is filling out the kv_cache.
+        input_chunks = input_ids.split(seqlen, dim=-1)
+        print("chunks", input_chunks)
+        original_outputs = {}
+        prompt_processing_end = signposter.begin_interval("prompt processing") if len(input_chunks) > 0 else None
+        for i, input_chunk in enumerate(input_chunks):
+            full_seqlen = (i+1)*seqlen - num_padding
+            original_inputs = {
+                "input_ids": input_chunk.int().numpy(),
+                "full_sequence_length": torch.tensor([full_seqlen]).int().numpy(),
+            }
+            # original_inputs["qk_mask"] = GPT.make_qk_mask(seqlen, maxseqlen, full_seqlen).half().numpy()
+            if len(original_outputs) == 0:
+                original_inputs["kv_cache"] = torch.zeros((num_layers, 1, cachelen, hidden_size*2)).half().numpy()
+            elif "prompt_kv_cache" in original_outputs:
+                original_inputs["kv_cache"] = original_outputs["prompt_kv_cache"]
+
+            non_cache_inputs = {k: v for k, v in original_inputs.items() if k not in ['kv_cache', 'qk_mask']}
+            print(f"chunk {i} inputs: {non_cache_inputs}")
+
+            # Specify that we want to save the new_kv_cache output and apply it as the next prediction's kv_cache input.
+            predict_key_mapping = {
+                "kv_cache": "prompt_kv_cache",
+                # "fake_input": "generation_kv_cache",
+            }
+
+            # coreml
+            print(f"chunk {i} inputs: {original_inputs['input_ids']}")
+            original_outputs = cached_mlmodel.predict(original_inputs, predict_key_mapping)
+            print("outputs", {k: v.shape for k, v in original_outputs.items()})
+            print(original_outputs["generation_kv_cache"])
+        if prompt_processing_end:
+            prompt_processing_end()
+
+        # Use the generation cache output from here on out.
         predict_key_mapping = {
-            "kv_cache": "new_kv_cache"
+            "fake_input": "prompt_kv_cache",
+            "kv_cache": "generation_kv_cache",
         }
-
-        # coreml
-        original_outputs = cached_mlmodel.predict(original_inputs, predict_key_mapping)
-
         # torch
         # with torch.no_grad():
         #     original_inputs = {k: torch.from_numpy(v) for k, v in original_inputs.items()}
@@ -841,9 +905,6 @@ if __name__ == "__main__":
 
         inference_times = []
 
-        from  os_signpost import Signposter
-        signposter = Signposter("com.smpanaro.more-ane-transformers", Signposter.Category.PointsOfInterest)
-
         # import os
         # print("PID:", os.getpid())
         # input("prese enter to go")
@@ -855,24 +916,38 @@ if __name__ == "__main__":
             # input_ids = input_ids[0, 1:] + [outputs["logits"].argmax()]
             # probs = torch.nn.functional.softmax(outputs["logits"], dim=-1)
             # next_idx = probs.argmax()
-            input_ids = torch.cat([input_ids[:,1:], torch.tensor([[outputs["logits"].argmax()]])], dim=1)
+            input_ids = torch.cat([input_ids, torch.tensor([[outputs["logits"].argmax()]])], dim=1)
             # print("input_ids", input_ids)
             currseqlen = seq.shape[1]+i+1
             inputs = {
-                "input_ids": input_ids.int().numpy(),
+                "input_ids": input_ids[:, -seqlen:].int().numpy(),
                 # "output_mask": torch.tensor([seq.shape[1]+i+num_padding]).int().numpy(),
-                "pos_offset": torch.tensor([seqlen - seq.shape[1] - 1 - i]).int().numpy(),
-                # "kv_cache": outputs["new_kv_cache"], # already numpy floats (from CoreML)
+                "full_sequence_length": torch.tensor([currseqlen]).int().numpy(),
+                # "kv_cache": outputs["generation_kv_cache"], # already numpy floats (from CoreML)
+                # "next_input_id_length": torch.tensor([1]).int().numpy(),
             }
+            # print("inputs", inputs)
 
             # Support the official coremltools, but also my custom version with
             # support for caching of kv_cache.
-            if "new_kv_cache" in outputs:
-                inputs["kv_cache"] = outputs["new_kv_cache"] # already numpy floats (from CoreML)
+            if "generation_kv_cache" in outputs:
+                inputs["kv_cache"] = outputs["generation_kv_cache"] # already numpy floats (from CoreML)
+                # inputs["kv_cache"] = torch.zeros_like(torch.from_numpy(outputs["new_kv_cache"])).numpy()
+                # print("new kv", outputs["new_kv_cache"].shape,"\n", outputs["new_kv_cache"][0, :, -8:, ::192])
+
+            # if "new_kv_cache" in outputs and "other_kv_cache" in outputs:
+            #     nkv = outputs["new_kv_cache"]
+            #     okv = outputs["other_kv_cache"]
+            #     print("new", nkv.shape, "\n", nkv[0, :, -9:, ::192])
+            #     print("other", okv.shape, "\n", okv[0, :, -9:, ::192])
+            #     assert torch.equal(torch.from_numpy(nkv), torch.from_numpy(okv))
+            # elif "new_kv_cache" in outputs:
+            #     nkv = outputs["new_kv_cache"]
+            #     print("new", nkv.shape, "\n", nkv[0, :, -9:, ::192])
 
             # inputs["kv_mask"] = build_kv_mask(inputs["output_mask"], seqlen=seqlen, hidden_size=hidden_size) # probably cheating to not include this in timing...
             # inputs["qk_mask"] = GPT.make_qk_mask(seqlen, maxseqlen, seqlen).numpy()
-            inputs["qk_mask"] = GPT.make_qk_mask(seqlen, maxseqlen, currseqlen).half().numpy()
+            # inputs["qk_mask"] = GPT.make_qk_mask(seqlen, maxseqlen, currseqlen).half().numpy()
 
             # Prune cache values for leading tokens that are not part of the sequence.
             # print(inputs["kv_cache"].shape)
@@ -921,7 +996,7 @@ if __name__ == "__main__":
             num_inferences += 1
 
         # input_ids[0, seq.shape[1]+i] = outputs["logits"].argmax()
-        input_ids = torch.cat([input_ids[:,1:], torch.tensor([[outputs["logits"].argmax()]])], dim=1)
+        input_ids = torch.cat([input_ids, torch.tensor([[outputs["logits"].argmax()]])], dim=1)
         print("final input_ids", input_ids)
         print(tok.decode(input_ids[0, :]))
 

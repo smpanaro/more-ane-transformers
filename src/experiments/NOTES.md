@@ -890,3 +890,126 @@ The first option means shuffling a decent amount more data and also makes it har
 The second probably won't run on the ANE, but would make things easier outside the model.
 
 Will try option 2. Think changing the shape of the cache from [layer, batch, 2*seq, dim] to [layer, batch, seq, 2*dim] will make slicing easier.
+
+## October 22, 2023
+~Maybe a third option for caching that is simpler: pad on the right and always slide window by input length.~ edit: Doesn't work.
+
+Basically need to have this input cache (simplified to just columns):
+[1 2 3 4 5 6 7 8 a b c d]
+Work for either:
+[b c d e] (single new token)
+[e f g h] (batch of new tokens)
+
+input_ids: 128
+input_length: 1-inf. - length of full sequence even parts that are > 512
+~new_tokens_length: 1-128 - length of tokens in input_ids that are new~
+next_new_input_length: 1-128 (default 1) - length of new tokens in next input_ids
+
+input_ids: [b c d e]
+input_length: 5
+new_tokens_length: 1
+old_k+new_k = [5 6 7 8 a b c d]
+
+input_ids: [e f g h]
+input_length: 8
+new_tokens_length: 4
+old_k+new_k = [5 6 7 8 a b c d]
+
+Tried it. Unfortunately, seems like this requires dynamic slicing (although technically things end up a static size) and it gets forced to CPU.
+
+## October 25, 2023
+Tried a few different things to get flexibility without leaving the ANE. It seems like as soon as you introduce anything dynamic -- either a dynamic shape, or even a static shape but take from a dynamic offset -- you get moved to CPU. This tends to be pretty slow, especially if you have ops that require conversion to float32 for CPU (some of the slice ops seem to). Roughly doubles duration (11->20ms) for gpt2, and it's proportional to KV cache size so larger models would be worse.
+
+Three main things I tried:
+- tensor slicing with a dynamic offset: full_kv_cache[:, :, 1d_index_tensor:1d_index_tensor+384, :]
+  - this translates to slice_by_index in MIL and runs on CPU
+  - seems to be some correctness issues (maybe quirks of float16 to float32 and back?)
+- full_kv_cache.index_select(2, torch.add(1d_index_tensor, torch.arange(384, dtype=torch.int32)))
+  - this translates to a gather in MIL and runs on CPU
+- Custom support for narrow (there's a GH issue with it) torch.narrow(full_kv_cache, 2, 1d_index_tensor, 384)
+  - translated this to slice_by_size, thought that the static size+shape might help, but this still runs on CPU (the conversion ends up doing something similar to slice_by_index and building a dynamic index tensor using concat) and requires conversion to float32
+
+Based on this a few ideas:
+- return two outputs: one cache assuming that the whole 128 inputs were consumed, one cache assuming that only 1 new token was consumed.
+  - pros: guessing this will be fast, since I think it will sidestep memory copies (hopefully)
+  - pros: really think this will run on ANE
+  - cons: chance that returning two offset copies of the same tensor causes a copy or something funky
+  - cons: have to switch between small + big cache which is a bit of a headache esp. in my custom coremltools implementation
+  - ~cons: slightly more complex since chunking the initial prompt needs to end on a multiple of 128 (first prompt has to be padded which is a bit unintuitive)
+  - ~cons: caches will have to be full size (max seq length), hopefully zero impact if using pixel buffers
+- revisit enumerated inputs.
+  - pros: if they all ran on ANE, this would be maximum speed.
+  - cons: need to figure out qk_mask here. possible that using a broadcastable mask would work since we only care about the last token.
+  - cons: if we ever cared about anything other than the last token, this would not work.
+  - cons: last time I tried enumerated inputs it did not work on ANE, even though it should based on my reading.
+- do nothing
+  - pros: as fast as it has been
+  - pros: definitely works
+  - cons: crawls if you have an initial prompt > 128 tokens (but you can trade off single token speed against larger initial prompts if you are commonly using large prompts -- maybe not bad).
+
+Leaning towards giving enumerated inputs (just input_ids) a shot, initially ignoring qk_mask just to see if it runs on ANE. If not, probably not worth the time and can try option 1 (thinking it might not be terrible even though it seems a bit odd on paper).
+
+Quick pass at enumerated inputs. Re-remembering why I avoid them. Even if only input_ids is varied, that translates to dynamic shapes as a result of concatenating the old and new KV caches. I'm guessing this is what causes it to not run on the ANE, but I could be misunderstanding. Maybe I need to open an issue.
+-- Actually, I'm not so sure. I have pared away most things and it still won't run on ANE. It's basically: input_embeddings (1, 128, hidden_size) or (1,1,hidden_size) fed into a sequence of MLP+LN and only outputting a subset of logits. Runs 100% on ANE if the input is not enumerated. But cannot get it off CPU when the input is enumerated. Oh my. It seems that layer norm + enumerated shapes does not work with ANE. https://github.com/apple/coremltools/issues/1909 repros locally for me, but even removing LN from gpt2 doesn't fix it.
+
+Would be very interesting to see if ml-ane-transformers layer norm suffers the same problem. Did some light hacking on the repro from 1909 and it seems like some 4D layer norm MIL ops do support ANE enumerated shapes, so there's hope.
+
+Soo.. it might be possible to do the same for non-ANE optimized gpt2. Going to continue binary-searching the architecture for unsupported pieces. Realized it's easy to identify in a trace, since there's a purple ANE blob where it tries to load and an error in the os_log when it fails.
+Chain of MLPs works, as long as there are no other inputs (interestingly).
+x + mlp(x) chain works
+~x = attn(x), x = x+mlp(x) chain works (note no layer norm pre-attn)~ edit: oops this was disconnected
+| ^ plus a logits = torch.einsum('bid,jd->bij', x, splits[0]) does _not_ work
+^ plus ln_f, as expected, does not work
+^ plus ln_f but layer_norm MIL overrode to unsqueeze(0).layer_norm(-1).squeeze(0) _does_ work(!)
+^ plus ln_2 in pre-mlp works
+^ plus attn(x) does not work
+^ plus attn(x) but only y = v and y.transpose(...) works (surprisingly that is noticeably slower)
+^ plus q@k and @v (no softmax) (no kv cache at this point either) does not work (oof)
+^ but without the scaling of q@k also does not work (long shot oh well)
+^ tried replacing q@k with einsum -- does not work (but does save a transpose, might be interesting)
+
+List of things that don't work:
+layer_norm for rank 3 inputs
+q@kT (maybe since the output has the same dynamic size in 2 dimensions? everywhere else is 1)
+
+## October 26, 2023
+Bad news/good news. I don't see a way to get the q@kT matrix multiplication working with enumerated shapes. Tried using the ml-ane-transformers einsum with no luck. However, according to Xcode performance tools, my iOS 17 device can do the matmul with enumerated shapes. So possible that upgrading OS is a solution. ... Switched to Sonoma, and yes, it also works on ANE.
+
+Given that, think I will pause on the enumerated until I start doing dev on Sonoma. Will give the other full-size cache option a go, since even if I do get enumerated inputs working on Sonoma, those will be with full-size caches and the consistency will be nice. Plus feels good to make the model fully functional (esp. if enumerated fails for some other reason).
+
+input_ids = (abcdefg)
+context = 10, input length = 3
+prompt batches = (xxa), (bcd), (efg) # x = pad
+input cache => concat => multi-token, single-token
+(xxxxxxx) => (xxxxxxxxxa) => (xxxxxxa), (xxxxxxx) # prompt 1, initialize input with pad
+(xxxxxxa) => (xxxxxxabcd) => (xxxabcd), (xxxxxab) # prompt 2, use multi-token
+(xxxabcd) => (xxxabcdefg) => (abcdefg), (xxabcde) # prompt 3, use multi-token
+predicts 'h', next input is (fgh)
+(xxabcde) => (xxabcdefgh) => (bcdefgh), (xabcdef) # generation 1, use single-token
+predicts 'i', next input is (ghi)
+(xabcdef) => (xabcdefghi) => (cdefghi), (abcdefg)
+                remove leading 3 ^          ^ remove leading 1 + trailing 2
+
+This is looking promising. Passing back two caches seems to add negligible (no?) overhead, and the generations from the single-token cache are accurate. Just need to run some tests to show that the prompt chunking approach actually works and we'll be home free.
+
+## October 28, 2023
+It works! Outputs match.
+
+Thinking it might make sense to shrink the input length from 128. Recomputed this table (seems slightly slower than last time, maybe I have less battery, relative comparison is all that matters):
+
+|model      |input length|median time (ms)|time for full prompt (ms)|time for 256 tokens (ms)|
+|--         |            |                |                         |
+|gpt2-large |128         |60              |240                      |15,360
+|gpt2-large |96          |58.2            |349                      |14,899
+|gpt2-large |64          |48.5            |388                      |12,416
+|gpt2-large |32          |44              |704                      |11,264
+|gpt2-large |2           |41              |10,496                   |10,496
+
+time for full prompt = ceil(512 / input_length) * median time
+time for 256 tokens = 256 * median time
+
+64 seems like a sweet spot. A huge initial prompt is still acceptably fast, but we can generate slightly more tokens per second after that.
+
+This is pretty cool. Basically a 4x speedup.
+
+Moved the qk_mask building into the model. Had to rewrite it, but one less input to deal with is worth it. gpt2-large is the same speed too, so nothing sacrificed.

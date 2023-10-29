@@ -13,7 +13,7 @@ import sys
 import platform
 
 """
-Convert a slightly modified nanoGPT or Huggingface pythia to CoreML.
+Convert a modified nanoGPT or Huggingface pythia to CoreML.
 """
 
 all_names = GPT2.model_names() + Pythia.model_names()
@@ -106,7 +106,7 @@ mlmodel = ct.convert(
         for k,v in output_types.items()
     ],
     compute_precision=compute_precision,
-    minimum_deployment_target=ct.target.iOS16, # To allow float16 inputs + outputs. # TODO: Make optional.
+    minimum_deployment_target=ct.target.iOS16, # To allow float16 inputs + outputs.
     convert_to="mlprogram",
 )
 
@@ -149,10 +149,10 @@ input_output_descriptions = {
     "logits": f"Predictions for the {logits_element_description} in the shape (1, 1, {vocab_size}). ",
 
     # KV Cache
-    "pos_offset": "The index of the first non-pad token in input_ids.",
-    "kv_cache": "Intermediary outputs from the prior prediction. For the first prediction, pass an array of all zeros. For subsequent predictions, pass the new_kv_cache output from the previous prediction.",
-    "new_kv_cache": "Intermediary outputs for the next prediction. Pass as the kv_cache input to the next prediction.",
-    "qk_mask": "An array that is added to the result of each Q@K matrix multiplication. Pass 0 for values that should be attended to and -1e4 for values that should be ignored. This should be a right triangle full of zeros with the hypotenuse on the top right and the lower-right corner at the bottom right of the matrix. Each leg should be the same length as the un-padded number of input tokens.",
+    "full_sequence_length": "The length of the full input tokens. This length excludes padding and includes tokens that have moved outside of input_ids' sliding window.",
+    "kv_cache": "Intermediary outputs from the prior prediction. For the first prediction, pass nothing to use the default array of all zeros. For subsequent predictions, pass the appropriate *_kv_cache output from the previous prediction.",
+    "prompt_kv_cache": "Intermediary outputs for the next prediction. Pass as the kv_cache input to the next prediction when evaluating the initial prompt.",
+    "generation_kv_cache": "Intermediary outputs for the next prediction. Pass as the kv_cache input to the next prediction after evaluating the initial prompt.",
 
     # No KV Cache
     "output_mask": "A single element array with the index of your sequence to predict. If your non-padded input length was N, pass [N-1].",

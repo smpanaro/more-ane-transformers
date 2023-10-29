@@ -430,7 +430,7 @@ class GPT(nn.Module):
     ## generate.py
 
     @staticmethod
-    def build_inputs(seq, outputs={}, pad_to_length=None, pad_token_id=-1, dtype=torch.float32, device="cpu"):
+    def build_inputs(seq, input_length=None, outputs={}, pad_to_length=None, pad_token_id=-1, prompt_chunk_idx=None):
         seqlen = seq.shape[1]
 
         if not pad_to_length:
@@ -450,8 +450,8 @@ class GPT(nn.Module):
         output_mask = torch.tensor([seqlen-1], dtype=torch.int32)
 
         return {
-            "input_ids": input_ids.int().to(device),
-            "output_mask": output_mask.to(device),
+            "input_ids": input_ids.int(),
+            "output_mask": output_mask,
         }
 
 if __name__ == "__main__":
