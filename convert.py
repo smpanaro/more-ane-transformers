@@ -206,8 +206,8 @@ print("coreml-traced   psnr:", compute_psnr(tr_out.numpy(), cm_out.numpy()))
 print("coreml-original psnr:", compute_psnr(og_out.numpy(), cm_out.numpy()))
 
 if model_name in ["gpt2-xl"]:
-    print("\n👋 This model is big. It will run fast if you have a recent Mac with a fast GPU.")
-    print("If not you can download a version that runs on the Neural Engine from the releases tab on GitHub.")
+    print("\n👋 This model is big. It will run on CPU and GPU as-is, but to run on the Neural Engine there are a few extra steps.")
+    print("You can also download a version that runs on the Neural Engine from the releases tab on GitHub.")
     print("If you want to build it yourself follow these steps:")
     print("1. Install coremltools >= 6.3")
     print(f"2. Run: python -m src.experiments.chunk_model --mlpackage-path {model_filename}.mlpackage -o .")

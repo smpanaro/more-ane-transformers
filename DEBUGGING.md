@@ -32,7 +32,7 @@ codesign --force --sign - /opt/homebrew/Cellar/python@3.10/3.10.12_1/Frameworks/
 You can record a trace using the Instruments UI, but it's easier to run via the command line:
 
 ```shell
-xctrace record --template InstrumentsTemplate.tracetemplate --launch -- /path/to/python generate.py --compute_unit CPUAndANE --model_path gpt2.mlpackage
+xctrace record --template InstrumentsTemplate.tracetemplate --launch -- /full/path/to/python generate.py --compute_unit CPUAndANE --model_path gpt2.mlpackage
 ```
 
 This will run until the program exits or until you hit Ctrl-C. Open the file in Instruments. This should give you a good overview of what happened wile the script ran. Be sure to expand the os_signpost instrument to see the spans for how long each prediction took.

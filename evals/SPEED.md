@@ -12,12 +12,15 @@ NOTE: These times are intended to give a rough relative measure of performance a
 
 ## gpt2
 
+All gpt2 timings use a performance-optimized (but equally accurate) version of coremltools. See [SETUP.md](SETUP.md) for details.
+
 |Device     |gpt2 (124M)|gpt2-medium (350M)|gpt2-large (774M)|gpt2-xl (1558M)¦|
 |-|-|-|-|-|
-|2021 MBP M1|69ms*      |103ms             |210ms            |455ms           |
-|2022 Air M2|-          |-                 |-                |406ms           |
+|2021 MBP M1|26ms*      |27ms              |51ms             |138ms           |
+|2022 Air M2|-          |-                 |-                |123ms<sup>estimate†</sup>           |
 
 \* partially runs on CPU
+† estimate based on the performance ratio from M1:M2 for a slower version of the same model
 
 ## pythia
 

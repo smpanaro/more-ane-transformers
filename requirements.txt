@@ -1,7 +1,7 @@
 torch==2.0.0
 transformers==4.24.0
-ane-transformers==0.1.3
+# ane-transformers==0.1.3 # This conflicts with torch, install it after all other dependencies.
 stopwatch.py==2.0.1
 scikit-learn==1.1.2
-coremltools>=6.3.0
+coremltools==7.0b2 # 7.0 converts gpt2 differently.
 os-signpost==0.0.3

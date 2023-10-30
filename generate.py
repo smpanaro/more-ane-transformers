@@ -286,7 +286,6 @@ generation_per_second = "{:.{}f} tokens/s".format(NUM_INFERENCES / generation_st
 
 first_load_caveat = " [uncached load, cached loads will be faster]" if did_compile_model else ""
 
-
 if args.timingstats:
     kl = 20
     vl = max([len(v) for v in [load_duration, total_prompt_duration, total_generation_duration, total_duration]])
@@ -302,3 +301,6 @@ else:
     print("Compute Unit:", args.compute_unit)
     print(f"{total_duration} total")
     print(f"{generation_per_token}/token")
+
+if not model.supports_input_output_cache:
+    print("\n🏎️  For a 2-5x speedup, follow the steps in SETUP.md.")

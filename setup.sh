@@ -3,7 +3,7 @@
 set -euo pipefail
 
 set +e
-PYTHON_VERSION=$(python3 -c "import sys; print('.'.join([str(x) for x in sys.version_info[:3]])); sys.exit(0 if sys.version_info[0] == 3 and sys.version_info[1] <= 10 else 1)")
+PYTHON_VERSION=$(python3 -c "import sys; print('.'.join([str(x) for x in sys.version_info[:3]])); sys.exit(0 if sys.version_info[0] == 3 and sys.version_info[1] <= 11 else 1)")
 PYTHON_VERSION_VALID=$?
 set -e
 
@@ -47,4 +47,5 @@ echo "Activated virtualenv"
 
 echo "Installing dependencies..."
 pip install -r requirements.txt
+pip install ane-transformers==0.1.3
 printf "All set! \360\237\220\254\n"
