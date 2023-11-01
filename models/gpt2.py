@@ -42,8 +42,7 @@ from torch.nn import functional as F
 @dataclass
 class CacheConfig:
     kv_cache: torch.Tensor # [num_layers, 1, 2*seqlen, n_embd]
-    qk_mask: torch.Tensor # [1, 1, seqlen, maxseqlen] UNUSED
-    # kv_mask: torch.BoolTensor # for masking oldk/oldv [1, seqlen, n_embd], can't build in the model (see comments in Attention class)
+    qk_mask: torch.Tensor # [1, 1, seqlen, maxseqlen]
     output_mask: torch.Tensor # [1]
     head_index: int
 
@@ -320,35 +319,17 @@ class GPT(nn.Module):
         kv_cache [# layers, batch size, context_length-input_length, hidden size*2]
         context_length [1]: the maximum number of tokens that the model can evaluate at once
         """
-        # assert kv_cache is None or idx.shape[1] == 1, f"kv cache is only supported for single token inputs not {idx.shape}"
         idx = input_ids
         return_kv_cache = kv_cache is not None
-
-        # print("idx", idx)
-        # print("pos_offset", pos_offset)
-        # print("kv_cache", kv_cache.shape if kv_cache is not None else None)
-        # print("qk_mask", qk_mask.shape if qk_mask is not None else None)
 
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
 
-        # pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0) # shape (1, t)
         pos_offset = t - full_sequence_length if full_sequence_length else 0
         pos = (torch.arange(0, t, dtype=torch.long, device=device) - pos_offset) # Shift so the first valid token is pos 0.
         pos = pos.maximum(torch.zeros(t, dtype=torch.long)) # Anything < 0 is a padding token, so set it to any valid index.
         pos = pos.unsqueeze(0) # shape (1, t)
-        # pos = torch.cat([
-        #     torch.arange(0, 3, dtype=torch.long, device=device), # junk
-        #     torch.arange(0, t-3, dtype=torch.long, device=device),
-        # ]).unsqueeze(0) # shape (1, t)
-        # print("POS", pos)
-
-        # ANE: Since we are only inferring and we only care about predicting the next token,
-        # we can use the same triangular mask always. May need to change this to support flexible sizes.
-        # attention_mask = (1 - torch.tril(torch.ones((1,1,seqlen,seqlen), dtype=torch.float32))) * -1e4
-        # attention_mask = (1 - torch.tril(torch.ones((1,1,idx.shape[1],idx.shape[1]), dtype=torch.float32))) * -1e4
-        # print(attention_mask)
 
         qk_mask = GPT.make_qk_mask(t, context_length, full_sequence_length)
 
@@ -362,7 +343,6 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (1, t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
 
-        # kv_mask_bool = kv_mask.bool() if kv_mask is not None else None
         new_kv_cache = []
         head_index = 0
         for (block, cache) in zip(self.transformer.h, kv_cache):
@@ -411,7 +391,6 @@ class GPT(nn.Module):
             # which means it gets punted to CPU and is slow (in this case forcing the whole model to CPU).
             # new_kv_cache = torch.narrow(full_kv_cache, 2, next_input_id_length, seqlen-128)
 
-            # print("new kv cache:", new_kv_cache.shape, next_input_id_length, seqlen-t+next_input_id_length)
             return logits, prompt_kv_cache, generation_kv_cache
 
         return logits
@@ -527,7 +506,7 @@ class GPT(nn.Module):
     ## convert.py
 
     def sample_inputs(self):
-        print('config', self.config)
+        # print('config', self.config)
         vocab_size = self.config.vocab_size
         num_layer = self.config.n_layer
         hidden_size = self.config.n_embd
@@ -587,7 +566,7 @@ class GPT(nn.Module):
         # Stock coremltools requires this, but my custom build handles it internally.
         if is_prompt and 'prompt_kv_cache' in outputs:
             inputs['kv_cache'] = outputs['prompt_kv_cache']
-        elif is_prompt and 'generation_kv_cache' in outputs:
+        elif not is_prompt and 'generation_kv_cache' in outputs:
             inputs['kv_cache'] = outputs['generation_kv_cache']
 
         return inputs
@@ -650,13 +629,6 @@ if __name__ == "__main__":
         return kv_mask
 
     model = GPT.from_pretrained("gpt2").eval()
-
-    # import sys
-    # from transformers import AutoTokenizer
-    # tok = AutoTokenizer.from_pretrained("gpt2")
-    # seq = tok("the quick brown fox", return_tensors="pt")["input_ids"]
-    # print("generate: ", tok.decode(model.generate(seq, 10, temperature=0.01).squeeze().tolist()))
-    # sys.exit()
 
     # Check numeric accuracy before converting to CoreML. It's not exact, might be a bug.
     # if True:

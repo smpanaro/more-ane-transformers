@@ -9,7 +9,7 @@ From the root of this repository run:
 You can speed up gpt2 text generation **2-5x** by installing a custom version of coremltools.
 
 ## Steps
-1. If you have not already, complete the simple setup above..
+1. If you have not already, complete the simple setup above.
 1. Clone my fork of coremltools: `git clone https://github.com/smpanaro/coremltools.git` and run `git checkout more-ane-transformers`.
     1. You can browse the differences [here](https://github.com/apple/coremltools/compare/main...smpanaro:coremltools:more-ane-transformers) if you are cautious about installing forked repositories.
 1. From this repo (more-ane-transformers), check the version of Python you are using.

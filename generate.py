@@ -302,5 +302,5 @@ else:
     print(f"{total_duration} total")
     print(f"{generation_per_token}/token")
 
-if not model.supports_input_output_cache:
+if not model.supports_input_output_cache and "kv_cache" in input_keys:
     print("\n🏎️  For a 2-5x speedup, follow the steps in SETUP.md.")

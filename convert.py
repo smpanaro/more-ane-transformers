@@ -30,7 +30,7 @@ use_float16 = supports_float16 or args.float16_mode == "force"
 if not supports_float16:
     print("float16 inputs and outputs are only supported on macOS13/iOS16 and higher.")
     print("Converting with float32 inputs and outputs instead, so you can run it on this device.")
-    print("If you plan to deploy to newer device, pass --float16_mode force to use float16 instead.")
+    print("If you plan to deploy to a newer device, pass --float16_mode force to use float16 instead.")
 if args.float16_mode == "force":
     print("Forcing conversion to use float16 inputs and outputs.")
 
@@ -44,10 +44,6 @@ if retrace:
     print(f"Loading model {model_name}...")
     model_class = GPT2 if model_filename.startswith("gpt2") else Pythia
     torch_model = model_class.from_pretrained(model_name).eval()
-
-    # input_ids = torch.randint(10000, (1,512,))
-    # output_mask = torch.randint(512, (1,))
-    # trace_inputs = list(torch_model.sample_inputs().values())
 
     sample_inputs = torch_model.sample_inputs()
     output_types = torch_model.output_types()
