@@ -26,10 +26,10 @@ Loaded model in 790.604ms.
 That model is tiny—sometimes the results are a bit nonsensical. You can run larger models for better results:
 |Model|Parameters|Size|Download|
 |--|--|--|--|
-|gpt2|124M|250MB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-April-02)|
-|gpt2-medium|350M|700MB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-April-02)|
-|gpt2-large|774M|1.5GB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-April-02)|
-|gpt2-xl|1558M|3GB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-April-02)|
+|gpt2|124M|250MB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-October-31)|
+|gpt2-medium|350M|700MB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-October-31)|
+|gpt2-large|774M|1.5GB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-October-31)|
+|gpt2-xl|1558M|3GB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-October-31)|
 |pythia-1b|1011M|2GB|[link](https://github.com/smpanaro/more-ane-transformers/releases/tag/v0-2023-May-29)|
 
 You can also see [evals/QUALITY.md](evals/QUALITY.md) for some example generations.
