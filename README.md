@@ -42,6 +42,8 @@ The gpt2-xl model (1.5B) generates *~5 words/sec* (7.5 tokens/sec) running purel
 
 See [evals/SPEED.md](evals/SPEED.md) for device benchmarks.
 
+https://github.com/smpanaro/more-ane-transformers/assets/2950214/dd346676-bcbf-4e93-9e84-0b0b6d119639
+
 ## What about iOS?
 Smaller models (gpt2, gpt2-medium) should run on most devices. Depending on how much memory the device has larger models may also work. iOS 17 added support for runtime quantization which in theory will allow for larger models on all devices—none of the models in the repo use this yet.
 
