@@ -17,10 +17,9 @@ All gpt2 timings use a performance-optimized (but equally accurate) version of c
 |Device     |gpt2 (124M)|gpt2-medium (350M)|gpt2-large (774M)|gpt2-xl (1558M)¦|
 |-|-|-|-|-|
 |2021 MBP M1|26ms*      |27ms              |51ms             |138ms           |
-|2022 Air M2|-          |-                 |-                |123ms<sup>estimate†</sup>           |
+|2022 Air M2|21ms*      |23ms              |46ms             |95ms            |
 
 \* partially runs on CPU
-† estimate based on the performance ratio from M1:M2 for a slower version of the same model
 
 ## pythia
 
